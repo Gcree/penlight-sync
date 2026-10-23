@@ -100,5 +100,11 @@ struct ScreenColorTest {
         ) == expected else {
             fatalError("Expected \(expected) from a solid-color pixel.")
         }
+        // The continuous screen stream delivers BGRA.
+        guard ScreenColorSampler.averageColor(
+            pixels: [expected.blue, expected.green, expected.red, 255], width: 1, height: 1, bytesPerRow: 4, bgra: true
+        ) == expected else {
+            fatalError("Expected \(expected) from a solid-color BGRA pixel.")
+        }
     }
 }

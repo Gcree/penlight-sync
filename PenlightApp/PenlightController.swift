@@ -12,6 +12,7 @@ private let minBrightnessKey = "minBrightness"
 private let sceneCutsKey = "sceneCuts"
 private let beatSyncKey = "beatSync"
 private let captureRegionKey = "captureRegion"
+private let lowLatencyKey = "lowLatency"
 
 struct DiscoveredLamp: Identifiable, Equatable {
     let id: UUID
@@ -32,9 +33,14 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         case stopping
     }
 
-    static let sampleInterval: TimeInterval = 0.2
+    /// How often the write watchdog and the latency readout run; screen colors arrive continuously from `ScreenStream`.
+    static let watchdogInterval: TimeInterval = 0.2
     /// Output frame rate; each frame writes only if the color changed and the previous write was acknowledged.
-    static let renderInterval: TimeInterval = 0.05
+    /// A frame is also rendered right after each new screen color and each write acknowledgement.
+    static let renderInterval: TimeInterval = 1.0 / 60
+    static let latencyReportInterval: TimeInterval = 5
+    /// Fade time used while low-latency mode is on (unless the slider is already shorter).
+    static let lowLatencyFade: TimeInterval = 0.15
     static let operationTimeout: TimeInterval = 8
     static let connectTimeout: TimeInterval = 15
     static let scanDuration: TimeInterval = 10
@@ -48,8 +54,15 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     }
     @Published var fadeTime: TimeInterval {
         didSet {
-            engine.fadeTime = fadeTime
+            engine.fadeTime = effectiveFadeTime
             UserDefaults.standard.set(fadeTime, forKey: fadeTimeKey)
+        }
+    }
+    /// Caps the fade at `lowLatencyFade` so the lamp follows the screen as closely as possible.
+    @Published var lowLatency: Bool {
+        didSet {
+            engine.fadeTime = effectiveFadeTime
+            UserDefaults.standard.set(lowLatency, forKey: lowLatencyKey)
         }
     }
     @Published var breathing: Bool {
@@ -90,6 +103,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         didSet {
             let stored = captureRegion.map { [$0.minX, $0.minY, $0.width, $0.height].map(Double.init) }
             UserDefaults.standard.set(stored, forKey: captureRegionKey)
+            screenStream?.update(region: captureRegion)
             if phase == .syncing { status = syncingStatus }
         }
     }
@@ -104,6 +118,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published private(set) var errorMessage: String?
     @Published private(set) var needsScreenPermission = false
     @Published private(set) var logLines: [String] = []
+    /// Recent average capture and Bluetooth round-trip times while syncing.
+    @Published private(set) var latencySummary: String?
 
     private var central: CBCentralManager!
     private var peripherals: [UUID: CBPeripheral] = [:]
@@ -112,13 +128,16 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private var scanStopWork: DispatchWorkItem?
     private var connectTimeoutWork: DispatchWorkItem?
     private var reconnectDeadlineWork: DispatchWorkItem?
-    private var sampleTimer: Timer?
+    private var watchdogTimer: Timer?
     private var renderTimer: Timer?
+    private var screenStream: ScreenStream?
     private var engine: LightEngine
     private var lastRenderAt: TimeInterval?
-    private var sampleTask: Task<Void, Never>?
-    private var sampleStartedAt: TimeInterval?
     private var writeStartedAt: TimeInterval?
+    private var captureLatency = LatencyMeter()
+    private var bluetoothLatency = LatencyMeter()
+    private var lastLatencyReport: TimeInterval = 0
+    private var latencyReports = 0
     private var pendingRGB: ScreenRGB?
     private var stopReason: String?
     private var audioMonitor: SystemAudioMonitor?
@@ -132,6 +151,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         minBrightness = defaults.object(forKey: minBrightnessKey) as? Double ?? 0
         sceneCuts = defaults.object(forKey: sceneCutsKey) as? Bool ?? true
         beatSync = defaults.bool(forKey: beatSyncKey)
+        lowLatency = defaults.bool(forKey: lowLatencyKey)
         if let stored = defaults.array(forKey: captureRegionKey) as? [Double], stored.count == 4 {
             captureRegion = CGRect(x: stored[0], y: stored[1], width: stored[2], height: stored[3])
         }
@@ -339,17 +359,22 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             return // Timers and audio kept running while the link was down.
         }
         log("連動開始。")
-        sampleTimer = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
-            self?.tick()
+        captureLatency = LatencyMeter()
+        bluetoothLatency = LatencyMeter()
+        lastLatencyReport = ProcessInfo.processInfo.systemUptime
+        latencyReports = 0
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: Self.watchdogInterval, repeats: true) { [weak self] _ in
+            self?.watchdog()
         }
         renderTimer = Timer.scheduledTimer(withTimeInterval: Self.renderInterval, repeats: true) { [weak self] _ in
             self?.render()
         }
+        startScreenStream()
         if beatSync { startAudio() }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard writeStartedAt != nil else { return }
+        guard let started = writeStartedAt else { return }
         writeStartedAt = nil
         let color = pendingRGB
         pendingRGB = nil
@@ -357,48 +382,68 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             if phase == .syncing { reconnect(because: "藍牙寫入失敗（\(error.localizedDescription)）") }
             return
         }
+        bluetoothLatency.add((ProcessInfo.processInfo.systemUptime - started) * 1000)
         if let color { lampColor = color }
-        if phase == .stopping, sampleStartedAt == nil { beginDisconnect() }
+        if phase == .stopping {
+            beginDisconnect()
+        } else {
+            render() // Send the next frame without waiting for the render timer.
+        }
     }
 
     // MARK: - Sync loop
 
-    private func tick() {
+    private func watchdog() {
         guard phase == .syncing else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if let started = sampleStartedAt, now - started >= Self.operationTimeout {
-            shutDown(reason: "螢幕取樣超過 8 秒沒有完成，已停止連動。請確認螢幕錄製權限後再試。")
-            return
-        }
         if let started = writeStartedAt, now - started >= Self.operationTimeout {
             reconnect(because: "藍牙寫入超過 8 秒沒有回應")
             return
         }
-        guard sampleStartedAt == nil else { return }
-        sampleStartedAt = now
+        if now - lastLatencyReport >= Self.latencyReportInterval {
+            lastLatencyReport = now
+            reportLatency()
+        }
+    }
+
+    private func startScreenStream() {
+        let stream = ScreenStream(
+            onColor: { [weak self] color, latency in self?.screenSampled(color, latency: latency) },
+            onFailure: { [weak self] error in self?.screenStreamFailed(error) }
+        )
+        screenStream = stream
         let region = captureRegion
-        sampleTask = Task { @MainActor [weak self] in
+        Task { @MainActor [weak self] in
             do {
-                let color = try await ScreenColorSampler().sample(region: region)
-                self?.sampled(color)
+                try await stream.start(region: region)
+                guard let self, self.screenStream === stream else {
+                    stream.stop() // Stopped or replaced while starting.
+                    return
+                }
+                if self.captureRegion != region { stream.update(region: self.captureRegion) }
             } catch {
-                self?.sampleFailed(error)
+                guard let self, self.screenStream === stream else { return }
+                self.screenStreamFailed(error)
             }
         }
     }
 
-    private func sampled(_ color: ScreenRGB) {
-        sampleStartedAt = nil
-        sampleTask = nil
-        guard phase == .syncing else {
-            if phase == .stopping, writeStartedAt == nil { beginDisconnect() }
-            return
-        }
-        screenColor = color
+    private func screenSampled(_ color: ScreenRGB, latency: Double) {
+        guard phase == .syncing || phase == .reconnecting else { return }
+        captureLatency.add(latency)
+        if color != screenColor { screenColor = color }
         engine.setTarget(color)
+        render() // React to the new color right away instead of waiting for the render timer.
     }
 
-    /// Advances the fade/breath effect and writes the frame when it differs from the lamp's acknowledged color.
+    private func screenStreamFailed(_ error: Error) {
+        screenStream = nil
+        guard phase == .syncing || phase == .reconnecting else { return }
+        if case ScreenColorError.screenCapturePermissionDenied = error { needsScreenPermission = true }
+        shutDown(reason: "螢幕擷取失敗：\(error.localizedDescription)")
+    }
+
+    /// Advances the effects and writes the frame when it differs from the lamp's acknowledged color.
     private func render() {
         guard phase == .syncing else { return }
         let now = ProcessInfo.processInfo.systemUptime
@@ -423,16 +468,18 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         }
     }
 
-    private func sampleFailed(_ error: Error) {
-        sampleStartedAt = nil
-        sampleTask = nil
-        if phase == .stopping {
-            if writeStartedAt == nil { beginDisconnect() }
-            return
+    /// Shows recent averages in the window and writes them to the log about every 30 seconds.
+    private func reportLatency() {
+        let capture = captureLatency.drain()
+        let bluetooth = bluetoothLatency.drain()
+        guard capture != nil || bluetooth != nil else { return }
+        func describe(_ stats: LatencyMeter.Summary?) -> String {
+            stats.map { String(format: "%.0f ms（最高 %.0f）", $0.average, $0.maximum) } ?? "—"
         }
-        guard phase == .syncing else { return }
-        if case ScreenColorError.screenCapturePermissionDenied = error { needsScreenPermission = true }
-        shutDown(reason: "螢幕取樣失敗：\(error.localizedDescription)")
+        let summary = "延遲（近 \(Int(Self.latencyReportInterval)) 秒平均）：畫面擷取 \(describe(capture))・藍牙來回 \(describe(bluetooth))"
+        latencySummary = summary
+        latencyReports += 1
+        if latencyReports % 6 == 1 { log(summary) }
     }
 
     // MARK: - Shutdown
@@ -453,21 +500,22 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         stopReason = reason
         phase = .stopping
         status = "停止中…"
-        sampleTimer?.invalidate()
-        sampleTimer = nil
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
         renderTimer?.invalidate()
         renderTimer = nil
+        screenStream?.stop()
+        screenStream = nil
         stopAudio()
         connectTimeoutWork?.cancel()
         reconnectDeadlineWork?.cancel()
         reconnectDeadlineWork = nil
-        if writeStartedAt == nil, sampleStartedAt == nil {
+        if writeStartedAt == nil {
             beginDisconnect()
         }
-        // Bound the wait for an outstanding sample, write acknowledgement or disconnect callback.
+        // Bound the wait for an outstanding write acknowledgement or disconnect callback.
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self, self.phase == .stopping else { return }
-            self.sampleTask?.cancel()
             self.beginDisconnect()
             self.finishStop()
         }
@@ -486,9 +534,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         guard phase == .stopping else { return }
         phase = .idle
         characteristic = nil
-        sampleStartedAt = nil
         writeStartedAt = nil
         pendingRGB = nil
+        lastRenderAt = nil
+        latencySummary = nil
         if let reason = stopReason {
             errorMessage = reason
             status = "連動已因錯誤停止。"
@@ -595,8 +644,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         captureRegion == nil ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。"
     }
 
+    private var effectiveFadeTime: TimeInterval { lowLatency ? min(fadeTime, Self.lowLatencyFade) : fadeTime }
+
     private func makeEngine() -> LightEngine {
-        var engine = LightEngine(fadeTime: fadeTime, breathing: breathing)
+        var engine = LightEngine(fadeTime: effectiveFadeTime, breathing: breathing)
         engine.vibrance = vibrance
         engine.minBrightness = minBrightness
         engine.sceneCuts = sceneCuts
@@ -617,5 +668,29 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         formatter.dateFormat = "HH:mm:ss"
         logLines.append("\(formatter.string(from: Date())) \(line)")
         if logLines.count > 200 { logLines.removeFirst(logLines.count - 200) }
+    }
+}
+
+/// Collects millisecond measurements between reports.
+struct LatencyMeter {
+    struct Summary {
+        let average: Double
+        let maximum: Double
+    }
+
+    private var total = 0.0
+    private var count = 0
+    private var maximum = 0.0
+
+    mutating func add(_ milliseconds: Double) {
+        total += milliseconds
+        count += 1
+        maximum = max(maximum, milliseconds)
+    }
+
+    /// Returns the average and maximum since the last call (nil if nothing was measured) and starts over.
+    mutating func drain() -> Summary? {
+        defer { self = LatencyMeter() }
+        return count > 0 ? Summary(average: total / Double(count), maximum: maximum) : nil
     }
 }

@@ -29,9 +29,15 @@ internal sealed class LampInfo
 /// </summary>
 internal sealed class PenlightController : IDisposable
 {
-    private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(200);
+    /// <summary>About 30 screen samples per second.</summary>
+    private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(33);
     /// <summary>Output frame rate; each frame writes only if the color changed and the previous write was acknowledged.</summary>
-    private static readonly TimeSpan RenderInterval = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan RenderInterval = TimeSpan.FromMilliseconds(15);
+    /// <summary>Swatch updates are limited to about 15 per second so the window stays light.</summary>
+    private static readonly TimeSpan ColorNotifyInterval = TimeSpan.FromMilliseconds(66);
+    private static readonly TimeSpan LatencyReportInterval = TimeSpan.FromSeconds(5);
+    /// <summary>Fade time used while low-latency mode is on (unless the slider is already shorter).</summary>
+    private const double LowLatencyFade = 0.15;
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ScanDuration = TimeSpan.FromSeconds(10);
@@ -48,6 +54,14 @@ internal sealed class PenlightController : IDisposable
     private bool _sceneCuts = true;
     private bool _beatSync;
     private RectangleF? _region;
+    private bool _lowLatency;
+    private readonly LatencyMeter _captureLatency = new();
+    private readonly LatencyMeter _bluetoothLatency = new();
+    private DateTime _lastLatencyReport;
+    private int _latencyReports;
+    private bool _colorsChanged;
+    private DateTime _lastColorNotify;
+    private IDisposable? _connectionRequest;
     private SystemAudioMonitor? _audio;
     private readonly string _logPath;
     private readonly List<LampInfo> _lamps = new();
@@ -86,6 +100,7 @@ internal sealed class PenlightController : IDisposable
                         case "breathing": _breathing = parts[1] == "1"; break;
                         case "sceneCuts": _sceneCuts = parts[1] == "1"; break;
                         case "beatSync": _beatSync = parts[1] == "1"; break;
+                        case "lowLatency": _lowLatency = parts[1] == "1"; break;
                         case "region":
                             var values = parts[1].Split(',').Select(v => double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : -1).ToArray();
                             if (values.Length == 4 && values.All(v => v is >= 0 and <= 1) && values[2] > 0 && values[3] > 0)
@@ -104,7 +119,9 @@ internal sealed class PenlightController : IDisposable
         _engine = MakeEngine();
     }
 
-    private LightEngine MakeEngine() => new(_fadeTime, _breathing)
+    private double EffectiveFadeTime => _lowLatency ? Math.Min(_fadeTime, LowLatencyFade) : _fadeTime;
+
+    private LightEngine MakeEngine() => new(EffectiveFadeTime, _breathing)
     {
         Vibrance = _vibrance, MinBrightness = _minBrightness, SceneCuts = _sceneCuts, BeatSync = _beatSync,
     };
@@ -124,6 +141,8 @@ internal sealed class PenlightController : IDisposable
     public bool MusicDetected { get; private set; }
     /// <summary>The music's tempo (rounded BPM) while beat sync is shaping the light.</summary>
     public int? Bpm { get; private set; }
+    /// <summary>Recent average capture and Bluetooth round-trip times while syncing.</summary>
+    public string? LatencySummary { get; private set; }
     public string LogPath => _logPath;
     public bool CanStart => BluetoothReady && Phase == Phase.Idle && _selectedAddress != null;
 
@@ -134,7 +153,19 @@ internal sealed class PenlightController : IDisposable
         set
         {
             _fadeTime = Math.Clamp(value, 0, 2);
-            _engine.FadeTime = _fadeTime;
+            _engine.FadeTime = EffectiveFadeTime;
+            SaveEffects();
+        }
+    }
+
+    /// <summary>Caps the fade at 0.15 s so the lamp follows the screen as closely as possible.</summary>
+    public bool LowLatency
+    {
+        get => _lowLatency;
+        set
+        {
+            _lowLatency = value;
+            _engine.FadeTime = EffectiveFadeTime;
             SaveEffects();
         }
     }
@@ -221,7 +252,8 @@ internal sealed class PenlightController : IDisposable
         string Number(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string Flag(bool value) => value ? "1" : "0";
         var text = $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
-            + $"minBrightness={Number(_minBrightness)}\nsceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n";
+            + $"minBrightness={Number(_minBrightness)}\nsceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n"
+            + $"lowLatency={Flag(_lowLatency)}\n";
         if (_region is { } r) text += $"region={Number(r.X)},{Number(r.Y)},{Number(r.Width)},{Number(r.Height)}\n";
         try { File.WriteAllText(_effectsPath, text); } catch (IOException) { }
     }
@@ -433,11 +465,44 @@ internal sealed class PenlightController : IDisposable
         if (characteristic == null || !characteristic.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Write))
             throw new SyncException("手燈的控制特徵 0000 不支援有回應寫入。");
         _characteristic = characteristic;
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) RequestFastConnection(device);
         return characteristic;
+    }
+
+    /// <summary>
+    /// Windows 11 lets apps ask for a shorter BLE connection interval, which shortens each write round trip.
+    /// The request lasts until it is disposed (in <see cref="ReleaseDevice"/>); the lamp may still decline.
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.22000.0")]
+    private void RequestFastConnection(BluetoothLEDevice device)
+    {
+        try
+        {
+            var request = device.RequestPreferredConnectionParameters(BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
+            if (request.Status == BluetoothLEPreferredConnectionParametersRequestStatus.Success)
+            {
+                _connectionRequest = request;
+                var interval = device.GetConnectionParameters().ConnectionInterval * 1.25;
+                Log($"已要求較短的藍牙連線間隔（Windows 11；目前 {interval:0.#} ms）。");
+            }
+            else
+            {
+                request.Dispose();
+                Log($"系統未接受較短的藍牙連線間隔（{request.Status}）。");
+            }
+        }
+        catch (Exception error)
+        {
+            Log($"無法調整藍牙連線間隔：{error.Message}");
+        }
     }
 
     private void BeginSync(GattCharacteristic characteristic)
     {
+        _captureLatency.Drain();
+        _bluetoothLatency.Drain();
+        _lastLatencyReport = DateTime.UtcNow;
+        _latencyReports = 0;
         _syncCts = new CancellationTokenSource();
         var token = _syncCts.Token;
         _syncTask = Task.WhenAll(RunLoopAsync(SampleLoopAsync(token), token), RunLoopAsync(RenderLoopAsync(characteristic, token), token));
@@ -535,7 +600,9 @@ internal sealed class PenlightController : IDisposable
             try
             {
                 var region = _region;
+                var watch = System.Diagnostics.Stopwatch.StartNew();
                 color = await Task.Run(() => sampler.Sample(region), token).WaitAsync(OperationTimeout, token);
+                _captureLatency.Add(watch.Elapsed.TotalMilliseconds);
             }
             catch (TimeoutException)
             {
@@ -545,9 +612,12 @@ internal sealed class PenlightController : IDisposable
             {
                 throw new SyncException($"螢幕取樣失敗：{error.Message}");
             }
-            ScreenColor = color;
+            if (color != ScreenColor)
+            {
+                ScreenColor = color;
+                _colorsChanged = true;
+            }
             _engine.SetTarget(color);
-            Notify();
             var remaining = SampleInterval - (DateTime.UtcNow - started);
             if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token);
         }
@@ -574,6 +644,7 @@ internal sealed class PenlightController : IDisposable
                 var writer = new DataWriter();
                 writer.WriteBytes(PenlightProtocol.Encode(color));
                 GattWriteResult result;
+                var watch = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
                     result = await characteristic.WriteValueWithResultAsync(writer.DetachBuffer(), GattWriteOption.WriteWithResponse)
@@ -589,12 +660,37 @@ internal sealed class PenlightController : IDisposable
                 }
                 if (result.Status != GattCommunicationStatus.Success)
                     throw new LinkException($"藍牙寫入失敗（{result.Status}）");
+                _bluetoothLatency.Add(watch.Elapsed.TotalMilliseconds);
                 LampColor = color;
+                _colorsChanged = true;
+            }
+            if (_colorsChanged && DateTime.UtcNow - _lastColorNotify >= ColorNotifyInterval)
+            {
+                _colorsChanged = false;
+                _lastColorNotify = DateTime.UtcNow;
                 Notify();
+            }
+            if (DateTime.UtcNow - _lastLatencyReport >= LatencyReportInterval)
+            {
+                _lastLatencyReport = DateTime.UtcNow;
+                ReportLatency();
             }
             var remaining = RenderInterval - (DateTime.UtcNow - now);
             if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token);
         }
+    }
+
+    /// <summary>Shows recent averages in the window and writes them to the log about every 30 seconds.</summary>
+    private void ReportLatency()
+    {
+        var capture = _captureLatency.Drain();
+        var bluetooth = _bluetoothLatency.Drain();
+        if (capture == null && bluetooth == null) return;
+        static string Describe((double Average, double Maximum)? stats) =>
+            stats is { } s ? $"{s.Average:0} ms（最高 {s.Maximum:0}）" : "—";
+        LatencySummary = $"延遲（近 {LatencyReportInterval.TotalSeconds:0} 秒平均）：畫面擷取 {Describe(capture)}・藍牙來回 {Describe(bluetooth)}";
+        if (_latencyReports++ % 6 == 0) Log(LatencySummary);
+        Notify();
     }
 
     private void OnConnectionStatusChanged(BluetoothLEDevice sender, object args)
@@ -618,6 +714,7 @@ internal sealed class PenlightController : IDisposable
         await StopLoopsAsync();
         ReleaseDevice();
         Phase = Phase.Idle;
+        LatencySummary = null;
         if (reason != null)
         {
             ErrorMessage = reason;
@@ -635,6 +732,8 @@ internal sealed class PenlightController : IDisposable
     private void ReleaseDevice()
     {
         // Windows closes the BLE link once every GATT object for the device is released.
+        _connectionRequest?.Dispose();
+        _connectionRequest = null;
         _characteristic = null;
         _service?.Dispose();
         _service = null;
@@ -668,4 +767,27 @@ internal sealed class PenlightController : IDisposable
 
     /// <summary>A Bluetooth link failure while syncing; handled by reconnecting instead of stopping.</summary>
     private sealed class LinkException(string message) : SyncException(message);
+}
+
+/// <summary>Collects millisecond measurements between reports.</summary>
+internal sealed class LatencyMeter
+{
+    private double _total;
+    private int _count;
+    private double _maximum;
+
+    public void Add(double milliseconds)
+    {
+        _total += milliseconds;
+        _count++;
+        _maximum = Math.Max(_maximum, milliseconds);
+    }
+
+    /// <summary>Returns the average and maximum since the last call (null if nothing was measured) and starts over.</summary>
+    public (double Average, double Maximum)? Drain()
+    {
+        (double, double)? result = _count > 0 ? (_total / _count, _maximum) : null;
+        (_total, _count, _maximum) = (0, 0, 0);
+        return result;
+    }
 }

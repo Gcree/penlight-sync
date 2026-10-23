@@ -19,7 +19,9 @@ Both apps share the same layout:
 - Scan for and pick a lamp, start/stop sync, and a log view. The last selected lamp is remembered.
 - **Capture area**: the whole main screen by default. Click 框選範圍… (Select area) and drag around the video (Esc cancels) so the lamp follows only that part of the screen, which helps when the video is not full screen. Click 整個螢幕 (Whole screen) to go back. The choice is remembered and can be changed while syncing.
 - **Auto-reconnect**: if the lamp drops the connection or a Bluetooth write fails while syncing, the app keeps the current light state and reconnects on its own for up to 30 seconds; it only stops (with the reason) if that fails. If it keeps failing, hold the lamp's back button to put it in pairing mode.
+- **Latency readout**: while syncing, a line under the status shows recent average "screen capture" and "Bluetooth round trip" times (ms) every 5 seconds, and the log records it about every 30 seconds, so you can compare settings.
 - **Light effects** (adjustable live while syncing; settings are remembered):
+  - **Low-latency mode** (off by default): caps the fade at 0.15 s (or the slider, if shorter) so the lamp tracks the screen closely; color changes look harder and less soft.
   - **Vibrance** (0–100%, default 40%): averaged video colors tend to look grayish, so this boosts saturation while keeping hue and brightness. Colors that are already vivid, or close to gray/white, barely change.
   - **Minimum brightness** (0–50%, default off): in dark scenes the lamp stays at least this bright (same hue; pure black becomes a dim white), so it never goes fully dark.
   - **Fade time** (0–2 s, default 0.6 s): colors cross-fade smoothly. The value is roughly the time to complete 95% of a change; 0 switches instantly. Higher feels softer, lower follows cuts more tightly.
@@ -48,7 +50,8 @@ Run `PenlightSync.exe`; it works the same way as the Mac app. The PC needs Bluet
 
 - Play the video full screen, or use 框選範圍… (Select area) to frame it, so the average reflects the video. Black letterbox/pillarbox bars are skipped, white subtitles in the bottom quarter are ignored, and the center counts about twice as much as the corners.
 - Sampling reads what is on the **main display**, not a single browser tab. A selected area is fixed to its place on the screen, so select it again after moving the video window.
-- The screen is sampled 5 times per second and light frames are sent at up to 20 per second. Only changed colors are sent; screen images are never stored or uploaded.
+- The screen is captured continuously (up to ~30 times per second; on the Mac a new frame only arrives when the screen changes), and the light reacts to each new color right away. Each Bluetooth write is sent as soon as the lamp acknowledges the previous one. Only changed colors are sent; screen images are never stored or uploaded.
+- Bluetooth latency: this lamp only accepts writes that wait for an acknowledgement, so every command costs one round trip. On Windows 11 the app also asks for a shorter BLE connection interval (the lamp may decline; the log shows the result). macOS offers apps no way to change the connection interval.
 
 ## Command-line tool (macOS)
 
@@ -68,7 +71,7 @@ The launcher only connects to the lamp listed in `device-id.txt`. CoreBluetooth 
 - macOS CLI and macOS app: a full-screen red → green → blue → white → black test got a write acknowledgement for every color, and the user confirmed the physical lamp changed in order. Scan, sync, and stop were tested on hardware. See `驗證紀錄.md` (Chinese).
 - Windows app: the protocol encoder, average color, and light-effect logic (including beat detection) pass the same test cases as the Swift code. **It has not yet been run on a real Windows PC**, and its system-audio capture is untested.
 - The v1.2.0 additions (vibrance, minimum brightness, bar/subtitle skipping, scene cuts, beat sync) have only passed automated tests and **have not been verified on a real lamp yet**.
-- The v1.3.0 additions (capture area selection, auto-reconnect, BPM-adaptive speed) have only passed automated tests and compilation and **have not been verified on a real lamp yet**.
+- The v1.3.0 additions (capture area selection, auto-reconnect, BPM-adaptive speed) and the later continuous capture, low-latency mode, latency readout, and Windows 11 connection parameters have only passed automated tests and compilation and **have not been verified on a real lamp yet**.
 - Not yet verified: long video sessions. If a screen capture or a single write takes longer than 8 seconds, sync stops with an error.
 
 ## Building and tests
@@ -84,10 +87,10 @@ cd windows && dotnet publish PenlightSyncWin -c Release -r win-x64 --self-contai
 
 The Windows app needs the .NET 8 SDK and can be cross-compiled on a Mac.
 
-- `ScreenColor.swift`: screen capture and average color; `PenlightProtocol.swift`: RGB frame encryption; `PenlightSync.swift`: CLI.
+- `ScreenColor.swift`: capture setup and average color (the CLI takes single screenshots; the desktop app captures continuously via `PenlightApp/ScreenStream.swift`); `PenlightProtocol.swift`: RGB frame encryption; `PenlightSync.swift`: CLI.
 - `PenlightApp/`: macOS SwiftUI window, controller, `LightEngine.swift` (vibrance, minimum brightness, fade, scene cuts, breathing, beats), `BeatDetector.swift` (beat detection), and `SystemAudioMonitor.swift` (system audio).
 - `windows/PenlightCore/`: C# port of the algorithms above; `windows/PenlightCore.Tests/` checks them with the same cases as Swift.
-- `windows/PenlightSyncWin/`: WinForms window, Windows Bluetooth (WinRT), screen capture, and system-audio capture (WASAPI via the MIT-licensed NAudio).
+- `windows/PenlightSyncWin/`: WinForms window, Windows Bluetooth (WinRT; asks for a shorter connection interval on Windows 11), screen capture (GDI StretchBlt straight to a thumbnail), and system-audio capture (WASAPI via the MIT-licensed NAudio).
 - `test_*.py`: build and run the Swift/C# self-tests, launcher tests, and CLI tests.
 
 ## Protocol source

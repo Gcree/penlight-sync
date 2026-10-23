@@ -9,7 +9,7 @@ struct PenlightApp: App {
     var body: some Scene {
         Window("Ado 手燈連動", id: "main") {
             ContentView(controller: controller)
-                .frame(width: 420, height: 860)
+                .frame(width: 420, height: 880)
         }
         .windowResizability(.contentSize)
     }
@@ -33,12 +33,20 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity)
 
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Circle()
-                    .fill(phaseColor)
-                    .frame(width: 10, height: 10)
-                Text(controller.status)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Circle()
+                        .fill(phaseColor)
+                        .frame(width: 10, height: 10)
+                    Text(controller.status)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let latency = controller.latencySummary {
+                    Text(latency)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 18)
+                }
             }
 
             GroupBox {
@@ -84,6 +92,7 @@ struct ContentView: View {
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 6) {
+                    Toggle("低延遲模式（漸變最多 0.15 秒，燈光緊跟畫面）", isOn: $controller.lowLatency)
                     SliderRow(title: "鮮豔度", value: $controller.vibrance, range: 0...1, step: 0.05) {
                         String(format: "%.0f%%", $0 * 100)
                     }
@@ -93,6 +102,7 @@ struct ContentView: View {
                     SliderRow(title: "漸變時間", value: $controller.fadeTime, range: 0...2, step: 0.1) {
                         $0 == 0 ? "立即" : String(format: "%.1f 秒", $0)
                     }
+                    .disabled(controller.lowLatency)
                     Toggle("換場快切（畫面大幅換色時加快漸變）", isOn: $controller.sceneCuts)
                     Toggle("呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", isOn: $controller.breathing)
                     HStack {

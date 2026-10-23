@@ -22,6 +22,7 @@ class MacAppTests(unittest.TestCase):
                     str(SOURCES / "PenlightApp" / "BeatDetector.swift"),
                     str(SOURCES / "PenlightApp" / "SystemAudioMonitor.swift"),
                     str(SOURCES / "PenlightApp" / "RegionSelector.swift"),
+                    str(SOURCES / "PenlightApp" / "ScreenStream.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightController.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightApp.swift"),
                     "-o",

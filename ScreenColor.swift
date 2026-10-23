@@ -47,26 +47,7 @@ public struct ScreenColorSampler {
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let configuration = SCStreamConfiguration()
-        configuration.width = 96
-        configuration.height = 54
-        configuration.preservesAspectRatio = true
-        configuration.scalesToFit = true
-        if let region = region?.intersection(CGRect(x: 0, y: 0, width: 1, height: 1)), !region.isEmpty {
-            let source = CGRect(
-                x: region.minX * CGFloat(display.width),
-                y: region.minY * CGFloat(display.height),
-                width: region.width * CGFloat(display.width),
-                height: region.height * CGFloat(display.height)
-            )
-            configuration.sourceRect = source
-            // Keep the 96×54 budget but match the region's shape so nothing is padded.
-            let aspect = source.width / max(source.height, 1)
-            if aspect >= 96.0 / 54.0 {
-                configuration.height = max(8, Int((96 / aspect).rounded()))
-            } else {
-                configuration.width = max(8, Int((54 * aspect).rounded()))
-            }
-        }
+        Self.configure(configuration, display: display, region: region)
 
         // ScreenCaptureKit returns SDR screenshots as BGRA; Core Graphics normalizes them to RGBA here.
         let image = try await SCScreenshotManager.captureImage(
@@ -104,7 +85,31 @@ public struct ScreenColorSampler {
         return color
     }
 
-    /// Video-oriented average of 8-bit premultiplied RGBA rows. Transparent pixels are skipped.
+    /// Sets a 96×54 output (or the same pixel budget in the region's shape, so nothing is padded) and,
+    /// when `region` is given (normalized 0–1, top-left origin), the matching source rectangle.
+    @available(macOS 12.3, *)
+    public static func configure(_ configuration: SCStreamConfiguration, display: SCDisplay, region: CGRect?) {
+        configuration.width = 96
+        configuration.height = 54
+        configuration.preservesAspectRatio = true
+        configuration.scalesToFit = true
+        guard let region = region?.intersection(CGRect(x: 0, y: 0, width: 1, height: 1)), !region.isEmpty else { return }
+        let source = CGRect(
+            x: region.minX * CGFloat(display.width),
+            y: region.minY * CGFloat(display.height),
+            width: region.width * CGFloat(display.width),
+            height: region.height * CGFloat(display.height)
+        )
+        configuration.sourceRect = source
+        let aspect = source.width / max(source.height, 1)
+        if aspect >= 96.0 / 54.0 {
+            configuration.height = max(8, Int((96 / aspect).rounded()))
+        } else {
+            configuration.width = max(8, Int((54 * aspect).rounded()))
+        }
+    }
+
+    /// Video-oriented average of 8-bit premultiplied RGBA (or BGRA when `bgra` is true) rows. Transparent pixels are skipped.
     /// - Letterbox/pillarbox bars (near-black edge rows and columns) are trimmed.
     /// - Near-white pixels in the bottom quarter (subtitles) are skipped.
     /// - Pixels near the center count up to twice as much as the corners.
@@ -114,7 +119,8 @@ public struct ScreenColorSampler {
         pixels: [UInt8],
         width: Int,
         height: Int,
-        bytesPerRow: Int
+        bytesPerRow: Int,
+        bgra: Bool = false
     ) -> ScreenRGB? {
         guard width > 0, height > 0, width <= Int.max / 4 else { return nil }
         let rowBytes = width * 4
@@ -123,14 +129,15 @@ public struct ScreenColorSampler {
         let requiredBytes = (height - 1) * bytesPerRow + rowBytes
         guard pixels.count >= requiredBytes else { return nil }
 
+        let redOffset = bgra ? 2 : 0, blueOffset = bgra ? 0 : 2
         func pixel(_ x: Int, _ y: Int) -> (r: Int, g: Int, b: Int)? {
             let offset = y * bytesPerRow + x * 4
             let alpha = Int(pixels[offset + 3])
             guard alpha > 0 else { return nil }
             return (
-                min(255, Int(pixels[offset]) * 255 / alpha),
+                min(255, Int(pixels[offset + redOffset]) * 255 / alpha),
                 min(255, Int(pixels[offset + 1]) * 255 / alpha),
-                min(255, Int(pixels[offset + 2]) * 255 / alpha)
+                min(255, Int(pixels[offset + blueOffset]) * 255 / alpha)
             )
         }
         func isBar(_ p: (r: Int, g: Int, b: Int)?) -> Bool {

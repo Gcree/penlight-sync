@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <!-- Built against the Windows 11 SDK for the BLE connection-parameter API; still runs on Windows 10 2004+. -->
+    <TargetFramework>net8.0-windows10.0.22000.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <!-- Allows building the Windows app from macOS. -->
@@ -12,7 +13,7 @@
     <RootNamespace>PenlightSync.Win</RootNamespace>
     <AssemblyName>PenlightSync</AssemblyName>
     <Product>Ado 手燈連動</Product>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../PenlightCore/PenlightCore.csproj" />

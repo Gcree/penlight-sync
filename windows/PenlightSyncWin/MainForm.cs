@@ -12,6 +12,8 @@ internal sealed class MainForm : Form
     private readonly Label _lampHex = Caption();
     private readonly Label _statusDot = new() { AutoSize = false, Size = new Size(12, 12), Margin = new Padding(0, 5, 6, 0) };
     private readonly Label _status = new() { AutoSize = true, MaximumSize = new Size(360, 0) };
+    private readonly Label _latency = new() { AutoSize = true, MaximumSize = new Size(380, 0), ForeColor = SystemColors.GrayText, Padding = new Padding(18, 0, 0, 4) };
+    private readonly CheckBox _lowLatencyCheck = new() { Text = "低延遲模式（漸變最多 0.15 秒，燈光緊跟畫面）", AutoSize = true };
     private readonly ListView _lampList = new()
     {
         View = View.Details, FullRowSelect = true, MultiSelect = false, HideSelection = false,
@@ -36,6 +38,7 @@ internal sealed class MainForm : Form
     private readonly Label _error = new() { AutoSize = true, MaximumSize = new Size(380, 0), ForeColor = Color.Firebrick };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font(FontFamily.GenericMonospace, 8.5f) };
     private bool _updatingList;
+    private string _lampListSignature = "";
 
     public MainForm()
     {
@@ -44,7 +47,7 @@ internal sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 920);
+        ClientSize = new Size(420, 960);
         StartPosition = FormStartPosition.CenterScreen;
 
         _lampList.Columns.Add("手燈", 150);
@@ -62,6 +65,8 @@ internal sealed class MainForm : Form
         var statusRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 8, 0, 8) };
         statusRow.Controls.Add(_statusDot);
         statusRow.Controls.Add(_status);
+        var latencyRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        latencyRow.Controls.Add(_latency);
 
         var lampBox = new GroupBox { Text = "手燈", Dock = DockStyle.Top, Height = 160, Padding = new Padding(8) };
         var scanRow = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
@@ -76,7 +81,7 @@ internal sealed class MainForm : Form
         regionRow.Controls.Add(_regionButton);
         regionBox.Controls.Add(regionRow);
 
-        var effectsBox = new GroupBox { Text = "燈光效果", Dock = DockStyle.Top, Height = 230, Padding = new Padding(8) };
+        var effectsBox = new GroupBox { Text = "燈光效果", Dock = DockStyle.Top, Height = 260, Padding = new Padding(8) };
         var beatRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
         beatRow.Controls.Add(_beatSyncCheck);
         beatRow.Controls.Add(_musicLabel);
@@ -87,6 +92,7 @@ internal sealed class MainForm : Form
         effectsBox.Controls.Add(TrackRow("漸變時間", _fadeTrack, _fadeValue));
         effectsBox.Controls.Add(TrackRow("最低亮度", _brightnessTrack, _brightnessValue));
         effectsBox.Controls.Add(TrackRow("鮮豔度", _vibranceTrack, _vibranceValue));
+        effectsBox.Controls.Add(CheckRow(_lowLatencyCheck));
 
         var errorRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         errorRow.Controls.Add(_error);
@@ -111,6 +117,7 @@ internal sealed class MainForm : Form
         root.Controls.Add(regionBox);
         root.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 8 });
         root.Controls.Add(lampBox);
+        root.Controls.Add(latencyRow);
         root.Controls.Add(statusRow);
         root.Controls.Add(swatches);
         root.Controls.Add(footer);
@@ -122,6 +129,7 @@ internal sealed class MainForm : Form
         _brightnessTrack.Value = (int)Math.Round(_controller.MinBrightness * 20);
         _fadeTrack.Value = (int)Math.Round(_controller.FadeTime * 10);
         _sceneCutsCheck.Checked = _controller.SceneCuts;
+        _lowLatencyCheck.Checked = _controller.LowLatency;
         _breathingCheck.Checked = _controller.Breathing;
         _beatSyncCheck.Checked = _controller.BeatSync;
         _vibranceTrack.ValueChanged += (_, _) =>
@@ -140,6 +148,11 @@ internal sealed class MainForm : Form
             Render();
         };
         _sceneCutsCheck.CheckedChanged += (_, _) => _controller.SceneCuts = _sceneCutsCheck.Checked;
+        _lowLatencyCheck.CheckedChanged += (_, _) =>
+        {
+            _controller.LowLatency = _lowLatencyCheck.Checked;
+            Render();
+        };
         _breathingCheck.CheckedChanged += (_, _) => _controller.Breathing = _breathingCheck.Checked;
         _beatSyncCheck.CheckedChanged += (_, _) => _controller.BeatSync = _beatSyncCheck.Checked;
         // Keep the whole window on small or high-DPI screens; the log area absorbs the difference.
@@ -184,6 +197,9 @@ internal sealed class MainForm : Form
         _brightnessValue.Text = _controller.MinBrightness == 0 ? "關" : $"{_controller.MinBrightness * 100:0}%";
         _fadeValue.Text = _controller.FadeTime == 0 ? "立即" : $"{_controller.FadeTime:0.0} 秒";
         _musicLabel.Visible = _controller.MusicDetected;
+        _latency.Text = _controller.LatencySummary ?? "";
+        _latency.Visible = _controller.LatencySummary != null;
+        _fadeTrack.Enabled = !_controller.LowLatency;
         _musicLabel.Text = _controller.Bpm is { } bpm ? $"♪ {bpm} BPM" : "♪ 偵測到節拍";
         _regionLabel.Text = _controller.Region is { } region ? $"框選範圍（寬 {region.Width * 100:0}%、高 {region.Height * 100:0}%）" : "整個主螢幕";
         _wholeScreenButton.Visible = _controller.Region != null;
@@ -196,18 +212,24 @@ internal sealed class MainForm : Form
         _error.Text = _controller.ErrorMessage ?? "";
         _error.Visible = _controller.ErrorMessage != null;
 
-        _updatingList = true;
-        _lampList.BeginUpdate();
-        _lampList.Items.Clear();
-        foreach (var lamp in _controller.Lamps)
+        // Rebuild the list only when it changed: Render runs many times per second while syncing.
+        string Signal(LampInfo lamp) => lamp.Rssi is { } rssi ? $"{rssi} dBm" : lamp.Remembered ? "上次使用" : "";
+        var signature = string.Join("|", _controller.Lamps.Select(l => $"{l.Address}:{Signal(l)}")) + $"#{_controller.SelectedAddress}";
+        if (signature != _lampListSignature)
         {
-            var signal = lamp.Rssi is { } rssi ? $"{rssi} dBm" : lamp.Remembered ? "上次使用" : "";
-            var item = new ListViewItem(new[] { PenlightProtocol.TargetName, lamp.AddressText, signal }) { Tag = lamp.Address };
-            item.Selected = lamp.Address == _controller.SelectedAddress;
-            _lampList.Items.Add(item);
+            _lampListSignature = signature;
+            _updatingList = true;
+            _lampList.BeginUpdate();
+            _lampList.Items.Clear();
+            foreach (var lamp in _controller.Lamps)
+            {
+                var item = new ListViewItem(new[] { PenlightProtocol.TargetName, lamp.AddressText, Signal(lamp) }) { Tag = lamp.Address };
+                item.Selected = lamp.Address == _controller.SelectedAddress;
+                _lampList.Items.Add(item);
+            }
+            _lampList.EndUpdate();
+            _updatingList = false;
         }
-        _lampList.EndUpdate();
-        _updatingList = false;
 
         var idle = _controller.Phase == Phase.Idle;
         _lampList.Enabled = idle;
