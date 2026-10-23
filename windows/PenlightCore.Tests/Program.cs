@@ -227,6 +227,21 @@ Check(new BeatDetector(rate).Process(new float[(int)(rate * 2)]).Count == 0, "si
 var tone = Enumerable.Range(0, (int)(rate * 3)).Select(i => (float)(0.5 * Math.Sin(2 * Math.PI * 60 * i / rate))).ToArray();
 Check(new BeatDetector(rate).Process(tone).Count <= 1, "steady tone does not keep producing beats");
 
+// Release versions: same cases as UpdateCheckerTests.swift.
+Check(ReleaseVersion.Parts("v1.4.0") is [1, 4, 0], "v-prefixed tag");
+Check(ReleaseVersion.Parts("1.10") is [1, 10], "plain version");
+Check(ReleaseVersion.Parts("v2.0.0-beta") is [2, 0, 0], "pre-release suffix is ignored");
+Check(ReleaseVersion.Parts("latest") == null, "non-version tag");
+Check(ReleaseVersion.Parts("v1..0") == null, "empty part");
+Check(ReleaseVersion.IsNewer("v1.5.0", "1.4.0"), "minor bump");
+Check(ReleaseVersion.IsNewer("v1.10.0", "1.9.3"), "numeric, not text, comparison");
+Check(ReleaseVersion.IsNewer("v2", "1.9.9"), "major bump with fewer parts");
+Check(ReleaseVersion.IsNewer("v1.4.1", "1.4"), "patch beyond a shorter version");
+Check(!ReleaseVersion.IsNewer("v1.4.0", "1.4.0"), "same version");
+Check(!ReleaseVersion.IsNewer("v1.4", "1.4.0"), "missing parts count as zero");
+Check(!ReleaseVersion.IsNewer("v1.3.9", "1.4.0"), "older version");
+Check(!ReleaseVersion.IsNewer("nightly", "1.4.0"), "unparseable tag is never newer");
+
 if (failures > 0)
 {
     Console.Error.WriteLine($"{failures} check(s) failed");

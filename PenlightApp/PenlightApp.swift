@@ -5,11 +5,12 @@ import SwiftUI
 struct PenlightApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = PenlightController()
+    @StateObject private var updates = UpdateChecker()
 
     var body: some Scene {
         Window("Ado 手燈連動", id: "main") {
-            ContentView(controller: controller)
-                .frame(width: 420, height: 880)
+            ContentView(controller: controller, updates: updates)
+                .frame(width: 420, height: 910)
         }
         .windowResizability(.contentSize)
     }
@@ -21,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct ContentView: View {
     @ObservedObject var controller: PenlightController
+    @ObservedObject var updates: UpdateChecker
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -161,11 +163,31 @@ struct ContentView: View {
                 .frame(minHeight: 48, maxHeight: .infinity)
             }
 
+            HStack {
+                Toggle("啟動時檢查更新", isOn: $updates.checkOnLaunch)
+                Spacer()
+                if let note = updates.note {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+                Button("立即檢查") { Task { await updates.check(manual: true) } }
+                    .disabled(updates.isChecking)
+            }
+
             Text("取色時自動略過黑邊與字幕；只送出改變的顏色，畫面與聲音都不儲存或上傳。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(20)
+        .task { await updates.checkOnLaunchIfEnabled() }
+        .alert("有新版本 \(updates.offered?.version ?? "")",
+               isPresented: Binding(get: { updates.offered != nil }, set: { if !$0 { updates.offered = nil } }),
+               presenting: updates.offered) { release in
+            Button("前往下載") { NSWorkspace.shared.open(UpdateChecker.downloadPage) }
+            Button("略過這個版本") { updates.skip(release) }
+            Button("稍後", role: .cancel) {}
+        } message: { _ in
+            Text("目前是 v\(updates.currentVersion)。下載新版後取代舊的 app 即可；更新後需要重新允許藍牙與螢幕錄製權限。")
+        }
     }
 
     private var regionDescription: String {

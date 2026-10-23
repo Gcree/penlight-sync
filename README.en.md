@@ -2,7 +2,7 @@
 
 English ｜ [中文](README.md)
 
-Samples the average color of your main screen (skipping letterbox bars and subtitles) and drives your own Ado Light Stick over Bluetooth Low Energy, so the penlight follows the video you are watching. Includes desktop apps for macOS and Windows plus a macOS command-line tool. No network, phone, or official app is needed at runtime.
+Samples the average color of your main screen (skipping letterbox bars and subtitles) and drives your own Ado Light Stick over Bluetooth Low Energy, so the penlight follows the video you are watching. Includes desktop apps for macOS and Windows plus a macOS command-line tool. No network, phone, or official app is needed to sync (only the update check contacts GitHub, and it can be turned off).
 
 ## Download
 
@@ -20,6 +20,7 @@ Both apps share the same layout:
 - **Capture area**: the whole main screen by default. Click 框選範圍… (Select area) and drag around the video (Esc cancels) so the lamp follows only that part of the screen, which helps when the video is not full screen. Click 整個螢幕 (Whole screen) to go back. The choice is remembered and can be changed while syncing.
 - **Auto-reconnect**: if the lamp drops the connection or a Bluetooth write fails while syncing, the app keeps the current light state and reconnects on its own for up to 30 seconds; it only stops (with the reason) if that fails. If it keeps failing, hold the lamp's back button to put it in pairing mode.
 - **Latency readout**: while syncing, a line under the status shows recent average "screen capture" and "Bluetooth round trip" times (ms) every 5 seconds, and the log records it about every 30 seconds, so you can compare settings.
+- **Update check**: on launch the app asks GitHub for the latest version number (on by default; untick 啟動時檢查更新 (Check for updates on launch) at the bottom of the window to turn it off). If a newer version exists, a prompt offers 前往下載 (Download), 略過這個版本 (Skip this version), or 稍後 (Later); 立即檢查 (Check now) checks any time. Only the version number is read and nothing is sent; without a network it stays quiet. Download the new version and replace the old one yourself (on the Mac, Bluetooth and Screen Recording must be allowed again after updating).
 - **Light effects** (adjustable live while syncing; settings are remembered):
   - **Low-latency mode** (off by default): caps the fade at 0.15 s (or the slider, if shorter) so the lamp tracks the screen closely; color changes look harder and less soft.
   - **Vibrance** (0–100%, default 40%): averaged video colors tend to look grayish, so this boosts saturation while keeping hue and brightness. Colors that are already vivid, or close to gray/white, barely change.
@@ -72,6 +73,7 @@ The launcher only connects to the lamp listed in `device-id.txt`. CoreBluetooth 
 - Windows app: the protocol encoder, average color, and light-effect logic (including beat detection) pass the same test cases as the Swift code. **It has not yet been run on a real Windows PC**, and its system-audio capture is untested.
 - The v1.2.0 additions (vibrance, minimum brightness, bar/subtitle skipping, scene cuts, beat sync) have only passed automated tests and **have not been verified on a real lamp yet**.
 - The v1.3.0 additions (capture area selection, auto-reconnect, BPM-adaptive speed) and the later continuous capture, low-latency mode, latency readout, and Windows 11 connection parameters have only passed automated tests and compilation and **have not been verified on a real lamp yet**.
+- The v1.5.0 update check: version comparison passes the same test cases in Swift and C#, and the GitHub latest-release lookup was confirmed to return a version. The update prompt has not yet been exercised against a real newer release, and the Windows app has still not run on a real PC.
 - Not yet verified: long video sessions. If a screen capture or a single write takes longer than 8 seconds, sync stops with an error.
 
 ## Building and tests

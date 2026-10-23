@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Drawing;
 using PenlightSync.Core;
 
@@ -6,6 +7,7 @@ namespace PenlightSync.Win;
 internal sealed class MainForm : Form
 {
     private readonly PenlightController _controller;
+    private readonly UpdateChecker _updates = new();
     private readonly Panel _screenSwatch = Swatch();
     private readonly Panel _lampSwatch = Swatch();
     private readonly Label _screenHex = Caption();
@@ -37,17 +39,21 @@ internal sealed class MainForm : Form
     private readonly Button _startButton = new() { Text = "▶ 開始連動", Height = 40, Dock = DockStyle.Top };
     private readonly Label _error = new() { AutoSize = true, MaximumSize = new Size(380, 0), ForeColor = Color.Firebrick };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font(FontFamily.GenericMonospace, 8.5f) };
+    private readonly CheckBox _checkUpdatesCheck = new() { Text = "啟動時檢查更新", AutoSize = true, Margin = new Padding(0, 6, 8, 0) };
+    private readonly Button _checkUpdatesButton = new() { Text = "立即檢查", AutoSize = true };
+    private readonly Label _updateNote = new() { AutoSize = true, ForeColor = SystemColors.GrayText, Margin = new Padding(6, 8, 0, 0) };
     private bool _updatingList;
     private string _lampListSignature = "";
 
     public MainForm()
     {
         Text = "Ado 手燈連動";
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Font = new Font("Microsoft JhengHei UI", 10f);
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 960);
+        ClientSize = new Size(420, 1000);
         StartPosition = FormStartPosition.CenterScreen;
 
         _lampList.Columns.Add("手燈", 150);
@@ -105,6 +111,11 @@ internal sealed class MainForm : Form
             Font = new Font(Font.FontFamily, 8.5f),
         };
 
+        var updateRow = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, WrapContents = false, Padding = new Padding(0, 6, 0, 0) };
+        updateRow.Controls.Add(_checkUpdatesCheck);
+        updateRow.Controls.Add(_checkUpdatesButton);
+        updateRow.Controls.Add(_updateNote);
+
         var root = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 16, 20, 8) };
         // Dock order: controls added later dock first, so add bottom-up.
         root.Controls.Add(_log);
@@ -120,6 +131,7 @@ internal sealed class MainForm : Form
         root.Controls.Add(latencyRow);
         root.Controls.Add(statusRow);
         root.Controls.Add(swatches);
+        root.Controls.Add(updateRow);
         root.Controls.Add(footer);
         Controls.Add(root);
 
@@ -182,7 +194,14 @@ internal sealed class MainForm : Form
             if (_updatingList || _lampList.SelectedItems.Count == 0) return;
             _controller.SelectedAddress = (ulong)_lampList.SelectedItems[0].Tag!;
         };
+        _checkUpdatesCheck.Checked = _updates.CheckOnLaunch;
+        _checkUpdatesCheck.CheckedChanged += (_, _) => _updates.CheckOnLaunch = _checkUpdatesCheck.Checked;
+        _checkUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync(manual: true);
         Shown += async (_, _) => await _controller.InitializeAsync();
+        Shown += async (_, _) =>
+        {
+            if (_updates.CheckOnLaunch) await CheckForUpdatesAsync(manual: false);
+        };
         FormClosing += (_, _) => _controller.Dispose();
         AcceptButton = _startButton;
         Render();
@@ -245,6 +264,52 @@ internal sealed class MainForm : Form
             _log.SelectionStart = _log.TextLength;
             _log.ScrollToCaret();
         }
+    }
+
+    /// <summary>A launch check stays silent unless there is a version the user has not skipped; a manual check always reports.</summary>
+    private async Task CheckForUpdatesAsync(bool manual)
+    {
+        if (!_checkUpdatesButton.Enabled) return;
+        _checkUpdatesButton.Enabled = false;
+        if (manual) _updateNote.Text = "正在檢查…";
+        try
+        {
+            var newer = await _updates.FindNewerAsync();
+            if (newer == null)
+            {
+                _updateNote.Text = manual ? $"已是最新版（v{_updates.CurrentVersion}）" : "";
+                return;
+            }
+            _updateNote.Text = $"有新版本 {newer}";
+            if (manual || !_updates.IsSkipped(newer)) OfferUpdate(newer);
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            if (manual) _updateNote.Text = "無法檢查更新，請確認網路連線。";
+        }
+        finally
+        {
+            _checkUpdatesButton.Enabled = true;
+        }
+    }
+
+    private void OfferUpdate(string version)
+    {
+        var download = new TaskDialogButton("前往下載");
+        var skip = new TaskDialogButton("略過這個版本");
+        var later = new TaskDialogButton("稍後");
+        var page = new TaskDialogPage
+        {
+            Caption = Text,
+            Heading = $"有新版本 {version}",
+            Text = $"目前是 v{_updates.CurrentVersion}。下載新版後解壓縮，取代舊的 PenlightSync.exe 即可。",
+            Icon = TaskDialogIcon.Information,
+            Buttons = { download, skip, later },
+            DefaultButton = download,
+        };
+        var clicked = TaskDialog.ShowDialog(this, page);
+        if (clicked == download) Process.Start(new ProcessStartInfo(UpdateChecker.DownloadPage) { UseShellExecute = true });
+        else if (clicked == skip) _updates.Skip(version);
     }
 
     private static void SetSwatch(Panel swatch, Label hex, Rgb? color)

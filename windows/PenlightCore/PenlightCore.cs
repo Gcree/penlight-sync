@@ -323,3 +323,36 @@ public sealed class BeatDetector
         Bpm = tempo;
     }
 }
+
+/// <summary>Port of ReleaseVersion in PenlightApp/UpdateChecker.swift: release tags such as "v1.4.0", compared part by part.</summary>
+public static class ReleaseVersion
+{
+    /// <summary>Numeric parts of "v1.4.0" / "1.4"; null when the text is not a version.</summary>
+    public static int[]? Parts(string text)
+    {
+        var body = text.Trim();
+        if (body.StartsWith('v') || body.StartsWith('V')) body = body[1..];
+        // Ignore a pre-release or build suffix such as "-beta" or "+abc".
+        var end = body.IndexOfAny(new[] { '-', '+' });
+        if (end >= 0) body = body[..end];
+        var parts = body.Split('.');
+        var numbers = new int[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (!int.TryParse(parts[i], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out numbers[i])) return null;
+        }
+        return numbers;
+    }
+
+    public static bool IsNewer(string candidate, string current)
+    {
+        if (Parts(candidate) is not { } a || Parts(current) is not { } b) return false;
+        for (var i = 0; i < Math.Max(a.Length, b.Length); i++)
+        {
+            var x = i < a.Length ? a[i] : 0;
+            var y = i < b.Length ? b[i] : 0;
+            if (x != y) return x > y;
+        }
+        return false;
+    }
+}

@@ -24,6 +24,7 @@ class MacAppTests(unittest.TestCase):
                     str(SOURCES / "PenlightApp" / "RegionSelector.swift"),
                     str(SOURCES / "PenlightApp" / "ScreenStream.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightController.swift"),
+                    str(SOURCES / "PenlightApp" / "UpdateChecker.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightApp.swift"),
                     "-o",
                     str(pathlib.Path(temporary) / "PenlightSyncApp"),
@@ -56,6 +57,11 @@ class MacAppTests(unittest.TestCase):
         self.compile_and_run(
             ["ScreenColor.swift", "PenlightApp/LightEngine.swift", "PenlightApp/BeatDetector.swift", "PenlightApp/LightEngineTests.swift"],
             "LightEngine self-tests passed",
+        )
+
+    def test_update_version_comparison(self):
+        self.compile_and_run(
+            ["PenlightApp/UpdateChecker.swift", "PenlightApp/UpdateCheckerTests.swift"], "UpdateChecker self-tests passed"
         )
 
     def test_info_plist_declares_bluetooth_usage(self):
