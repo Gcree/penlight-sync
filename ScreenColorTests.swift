@@ -16,28 +16,26 @@ struct ScreenColorTest {
         testSolidColor(ScreenRGB(red: 0, green: 0, blue: 0))
         testSolidColor(ScreenRGB(red: 128, green: 128, blue: 128))
 
-        let redBlue = [UInt8](repeating: 0, count: 8)
-        var mixed = redBlue
-        mixed[0...3] = [255, 0, 0, 255]
-        mixed[4...7] = [0, 0, 255, 255]
-        guard let selected = ScreenColorSampler.dominantColor(
-            pixels: mixed, width: 2, height: 1, bytesPerRow: 8
-        ), max(selected.red, selected.blue) > 200, selected.green < 16,
-           !(selected.red > 100 && selected.blue > 100) else {
-            fatalError("Mixed red and blue pixels must select a real dominant color, not average purple.")
+        let redBlue: [UInt8] = [255, 0, 0, 255, 0, 0, 255, 255]
+        guard ScreenColorSampler.averageColor(
+            pixels: redBlue, width: 2, height: 1, bytesPerRow: 8
+        ) == ScreenRGB(red: 128, green: 0, blue: 128) else {
+            fatalError("Mixed red and blue pixels must average to purple.")
         }
 
         let paddedRows: [UInt8] = [
             240, 8, 10, 255, 0, 0, 0, 0, 0xEE, 0xEE, 0xEE, 0xEE,
             240, 8, 10, 255, 0, 0, 0, 0, 0xDD, 0xDD, 0xDD, 0xDD,
         ]
-        guard ScreenColorSampler.dominantColor(
+        guard ScreenColorSampler.averageColor(
             pixels: paddedRows, width: 2, height: 2, bytesPerRow: 12
         ) == ScreenRGB(red: 240, green: 8, blue: 10) else {
             fatalError("Padded rows or transparent pixels were read incorrectly.")
         }
-        guard ScreenColorSampler.dominantColor(
+        guard ScreenColorSampler.averageColor(
             pixels: [0, 0, 0, 255], width: 2, height: 1, bytesPerRow: 8
+        ) == nil, ScreenColorSampler.averageColor(
+            pixels: [0, 0, 0, 0], width: 1, height: 1, bytesPerRow: 4
         ) == nil else {
             fatalError("Malformed buffers must return nil.")
         }
@@ -47,7 +45,7 @@ struct ScreenColorTest {
 
     private static func testSolidColor(_ expected: ScreenRGB) {
         let bytes = [expected.red, expected.green, expected.blue, 255]
-        guard ScreenColorSampler.dominantColor(
+        guard ScreenColorSampler.averageColor(
             pixels: bytes, width: 1, height: 1, bytesPerRow: 4
         ) == expected else {
             fatalError("Expected \(expected) from a solid-color pixel.")

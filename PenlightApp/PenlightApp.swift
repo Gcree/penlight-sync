@@ -9,7 +9,7 @@ struct PenlightApp: App {
     var body: some Scene {
         Window("Ado 手燈連動", id: "main") {
             ContentView(controller: controller)
-                .frame(width: 420, height: 640)
+                .frame(width: 420, height: 720)
         }
         .windowResizability(.contentSize)
     }
@@ -25,7 +25,7 @@ struct ContentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
-                Swatch(title: "螢幕主色", color: controller.screenColor)
+                Swatch(title: "螢幕平均色", color: controller.screenColor)
                 Image(systemName: "arrow.right")
                     .font(.title2)
                     .foregroundStyle(.secondary)
@@ -66,6 +66,21 @@ struct ContentView: View {
                 }
             } label: {
                 Text("手燈")
+            }
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("漸變時間")
+                        Slider(value: $controller.fadeTime, in: 0...2, step: 0.1)
+                        Text(controller.fadeTime == 0 ? "立即" : String(format: "%.1f 秒", controller.fadeTime))
+                            .monospacedDigit()
+                            .frame(width: 48, alignment: .trailing)
+                    }
+                    Toggle("呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", isOn: $controller.breathing)
+                }
+            } label: {
+                Text("燈光效果")
             }
 
             Group {

@@ -18,6 +18,7 @@ class MacAppTests(unittest.TestCase):
                     "-parse-as-library",
                     str(SOURCES / "ScreenColor.swift"),
                     str(SOURCES / "PenlightProtocol.swift"),
+                    str(SOURCES / "PenlightApp" / "LightEngine.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightController.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightApp.swift"),
                     "-o",
@@ -27,6 +28,31 @@ class MacAppTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+
+    def compile_and_run(self, sources, marker, parse_as_library=True):
+        with tempfile.TemporaryDirectory(prefix="penlight-swift-test-") as temporary:
+            binary = pathlib.Path(temporary) / "SwiftTests"
+            flags = ["-parse-as-library"] if parse_as_library else []
+            subprocess.run(
+                ["swiftc", *flags, *[str(SOURCES / source) for source in sources], "-o", str(binary)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(marker, result.stdout)
+
+    def test_average_color(self):
+        self.compile_and_run(
+            ["ScreenColor.swift", "ScreenColorTests.swift"], "ScreenColorSampler self-tests passed", parse_as_library=False
+        )
+
+    def test_light_engine_fade_and_breathing(self):
+        self.compile_and_run(
+            ["ScreenColor.swift", "PenlightApp/LightEngine.swift", "PenlightApp/LightEngineTests.swift"],
+            "LightEngine self-tests passed",
+        )
 
     def test_info_plist_declares_bluetooth_usage(self):
         result = subprocess.run(

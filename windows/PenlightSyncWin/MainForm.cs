@@ -18,6 +18,9 @@ internal sealed class MainForm : Form
         HeaderStyle = ColumnHeaderStyle.Nonclickable, Height = 96, Dock = DockStyle.Top,
     };
     private readonly Button _scanButton = new() { Text = "掃描手燈", AutoSize = true };
+    private readonly TrackBar _fadeTrack = new() { Minimum = 0, Maximum = 20, TickFrequency = 5, SmallChange = 1, LargeChange = 5, Width = 220, AutoSize = false, Height = 32 };
+    private readonly Label _fadeValue = new() { AutoSize = false, Width = 60, Height = 28, TextAlign = ContentAlignment.MiddleRight };
+    private readonly CheckBox _breathingCheck = new() { Text = "呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", AutoSize = true };
     private readonly Button _startButton = new() { Text = "▶ 開始連動", Height = 40, Dock = DockStyle.Top };
     private readonly Label _error = new() { AutoSize = true, MaximumSize = new Size(380, 0), ForeColor = Color.Firebrick };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font(FontFamily.GenericMonospace, 8.5f) };
@@ -30,7 +33,7 @@ internal sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 640);
+        ClientSize = new Size(420, 720);
         StartPosition = FormStartPosition.CenterScreen;
 
         _lampList.Columns.Add("手燈", 150);
@@ -41,7 +44,7 @@ internal sealed class MainForm : Form
         swatches.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         swatches.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 30));
         swatches.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        swatches.Controls.Add(SwatchColumn(_screenSwatch, "螢幕主色", _screenHex), 0, 0);
+        swatches.Controls.Add(SwatchColumn(_screenSwatch, "螢幕平均色", _screenHex), 0, 0);
         swatches.Controls.Add(new Label { Text = "→", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = SystemColors.GrayText }, 1, 0);
         swatches.Controls.Add(SwatchColumn(_lampSwatch, "手燈", _lampHex), 2, 0);
 
@@ -54,6 +57,16 @@ internal sealed class MainForm : Form
         scanRow.Controls.Add(_scanButton);
         lampBox.Controls.Add(_lampList);
         lampBox.Controls.Add(scanRow);
+
+        var effectsBox = new GroupBox { Text = "燈光效果", Dock = DockStyle.Top, Height = 100, Padding = new Padding(8) };
+        var fadeRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
+        fadeRow.Controls.Add(new Label { Text = "漸變時間", AutoSize = false, Width = 70, Height = 28, TextAlign = ContentAlignment.MiddleLeft });
+        fadeRow.Controls.Add(_fadeTrack);
+        fadeRow.Controls.Add(_fadeValue);
+        var breathingRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        breathingRow.Controls.Add(_breathingCheck);
+        effectsBox.Controls.Add(breathingRow);
+        effectsBox.Controls.Add(fadeRow);
 
         var errorRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         errorRow.Controls.Add(_error);
@@ -73,6 +86,8 @@ internal sealed class MainForm : Form
         root.Controls.Add(errorRow);
         root.Controls.Add(_startButton);
         root.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 12 });
+        root.Controls.Add(effectsBox);
+        root.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 8 });
         root.Controls.Add(lampBox);
         root.Controls.Add(statusRow);
         root.Controls.Add(swatches);
@@ -81,6 +96,14 @@ internal sealed class MainForm : Form
 
         _controller = new PenlightController();
         _controller.Changed += Render;
+        _fadeTrack.Value = (int)Math.Round(_controller.FadeTime * 10);
+        _breathingCheck.Checked = _controller.Breathing;
+        _fadeTrack.ValueChanged += (_, _) =>
+        {
+            _controller.FadeTime = _fadeTrack.Value / 10.0;
+            Render();
+        };
+        _breathingCheck.CheckedChanged += (_, _) => _controller.Breathing = _breathingCheck.Checked;
         _scanButton.Click += (_, _) =>
         {
             if (_controller.IsScanning) _controller.StopScan(); else _controller.StartScan();
@@ -105,6 +128,7 @@ internal sealed class MainForm : Form
         SetSwatch(_screenSwatch, _screenHex, _controller.ScreenColor);
         SetSwatch(_lampSwatch, _lampHex, _controller.LampColor);
         _status.Text = _controller.Status;
+        _fadeValue.Text = _controller.FadeTime == 0 ? "立即" : $"{_controller.FadeTime:0.0} 秒";
         _statusDot.BackColor = _controller.Phase switch
         {
             Phase.Syncing => Color.SeaGreen,

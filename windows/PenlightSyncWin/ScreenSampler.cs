@@ -6,7 +6,7 @@ using PenlightSync.Core;
 
 namespace PenlightSync.Win;
 
-/// <summary>Captures the primary screen, scales it to 96×54 like the macOS sampler, and returns its dominant color.</summary>
+/// <summary>Captures the primary screen, scales it to 96×54 like the macOS sampler, and returns its average color.</summary>
 internal sealed class ScreenSampler : IDisposable
 {
     private const int SampleWidth = 96;
@@ -39,7 +39,7 @@ internal sealed class ScreenSampler : IDisposable
             var pixels = new byte[stride * SampleHeight];
             Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
             // Format32bppArgb is stored as B, G, R, A in memory.
-            return DominantColor.Find(pixels, SampleWidth, SampleHeight, stride, bgra: true)
+            return AverageColor.Find(pixels, SampleWidth, SampleHeight, stride, bgra: true)
                 ?? throw new InvalidOperationException("無法讀取螢幕畫面。");
         }
         finally

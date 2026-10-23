@@ -1,0 +1,91 @@
+# Ado Light Stick Screen Sync
+
+English ｜ [中文](README.md)
+
+Samples the average color of your main screen and drives your own Ado Light Stick over Bluetooth Low Energy, so the penlight follows the video you are watching. Includes desktop apps for macOS and Windows plus a macOS command-line tool. No network, phone, or official app is needed at runtime.
+
+## Download
+
+Get the latest build from [Releases](https://github.com/Gcree/penlight-sync/releases):
+
+- `PenlightSync-macOS.zip`: macOS 14 or later (Apple silicon and Intel).
+- `PenlightSync-Windows-x64.zip`: Windows 10 (version 2004) or 11. The .NET runtime is bundled; nothing else to install.
+
+## Desktop apps
+
+Both apps share the same layout:
+
+- Two swatches: "screen average color → current lamp color". The lamp swatch only updates after the lamp acknowledges a write.
+- Scan for and pick a lamp, start/stop sync, and a log view. The last selected lamp is remembered.
+- **Light effects** (adjustable live while syncing; settings are remembered):
+  - **Fade time** (0–2 s, default 0.6 s): colors cross-fade smoothly. The value is roughly the time to complete 95% of a change; 0 switches instantly. Higher feels softer, lower follows cuts more tightly.
+  - **Breathing** (off by default): while the screen color is steady, lamp brightness slowly rises and falls about every 4 seconds (down to ~70%). It steps aside as soon as the color changes, so it never fights the video.
+
+### macOS
+
+1. Close the Ado app on your phone, then hold the button on the back of the lamp until the blue light blinks (pairing mode).
+2. Open "Ado 手燈連動". On first launch, allow Bluetooth access when macOS asks.
+3. Click 掃描手燈 (Scan) → pick the lamp → click 開始連動 (Start).
+4. The first sync needs Screen Recording permission: allow the app in System Settings › Privacy & Security › Screen & System Audio Recording. If it is not listed, click "+" and add the app. Then **quit and reopen the app**.
+5. Click 停止 (Stop) to disconnect so the phone app can use the lamp again.
+
+The app is ad-hoc signed (not notarized). If macOS blocks it, right-click the app in Finder and choose Open. Every rebuild counts as a new app to macOS, so Bluetooth and Screen Recording must be allowed again.
+
+### Windows
+
+Run `PenlightSync.exe`; it works the same way as the Mac app. The PC needs Bluetooth LE turned on. You do not need to pair the lamp in Windows Settings first.
+
+- If "Windows protected your PC" appears, click "More info" → "Run anyway" (the app is not commercially code-signed).
+- Log file: `%LOCALAPPDATA%\PenlightSync\latest.log`.
+
+### Tips
+
+- Play the video full screen, or at least make it fill most of the screen, so the average reflects the video. The desktop, subtitles, and other windows are included in the average.
+- The capture area is the whole **main display**, not a single browser tab.
+- The screen is sampled 5 times per second and light frames are sent at up to 20 per second. Only changed colors are sent; screen images are never stored or uploaded.
+
+## Command-line tool (macOS)
+
+1. Close the Ado app on your phone; put the lamp in pairing mode.
+2. Double-click `開始連動.command`. Allow Bluetooth and Screen Recording if asked.
+3. Press **Control-C** in the Terminal window to stop. Each run lasts at most one hour.
+
+The first time you start it from Terminal, allow **Screen Recording for Terminal** in System Settings, then quit and reopen Terminal. If startup fails, the error stays in the window and is logged to `ado-penlight-sync/latest.log` in the macOS temporary folder.
+
+The launcher only connects to the lamp listed in `device-id.txt`. CoreBluetooth identifiers differ per Mac: run `./PenlightSync --probe` and save the value after `PROBE_OK identifier=` as `device-id.txt` in this folder (the file is not tracked by git). The CLI uses the same average-color sampling, writes at most four times per second, and has no fade or breathing effects.
+
+`--probe` only reads services; `--rgb RRGGBB --device UUID` sends one color; `--calibrate --device UUID` accepts observed hex frames for diagnostics.
+
+## What has been verified
+
+- Protocol: generated red/green/blue/off frames match captured packets; newly generated white/cyan/off frames were confirmed on the real lamp.
+- macOS CLI and macOS app: a full-screen red → green → blue → white → black test got a write acknowledgement for every color, and the user confirmed the physical lamp changed in order. Scan, sync, and stop were tested on hardware. See `驗證紀錄.md` (Chinese).
+- Windows app: the protocol encoder, average color, and light-effect logic pass the same test cases as the Swift code. **It has not yet been run on a real Windows PC.**
+- Not yet verified: long video sessions and automatic reconnection (a disconnect currently stops sync with an error; click Start again). If a screen capture or a single write takes longer than 8 seconds, sync stops with an error.
+
+## Building and tests
+
+```sh
+./build_mac_app.sh                                    # builds dist/PenlightSync.app
+swiftc -parse-as-library ScreenColor.swift PenlightProtocol.swift PenlightSync.swift -o PenlightSync   # CLI
+python3 -m unittest discover -s . -p 'test_*.py' -v   # all tests
+cd windows && dotnet publish PenlightSyncWin -c Release -r win-x64 --self-contained true \
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true \
+  -p:EnableCompressionInSingleFile=true -p:DebugType=none -o ../dist/windows
+```
+
+The Windows app needs the .NET 8 SDK and can be cross-compiled on a Mac.
+
+- `ScreenColor.swift`: screen capture and average color; `PenlightProtocol.swift`: RGB frame encryption; `PenlightSync.swift`: CLI.
+- `PenlightApp/`: macOS SwiftUI window, controller, and `LightEngine.swift` (fade/breathing).
+- `windows/PenlightCore/`: C# port of the algorithms above; `windows/PenlightCore.Tests/` checks them with the same cases as Swift.
+- `windows/PenlightSyncWin/`: WinForms window, Windows Bluetooth (WinRT), and screen capture.
+- `test_*.py`: build and run the Swift/C# self-tests, launcher tests, and CLI tests.
+
+## Protocol source
+
+The RGB frame format follows [Polyfish0's public Ado light stick implementation](https://github.com/Polyfish0/abo-light-stick-app/blob/master/app/src/main/java/de/polyfish0/adolightstick/LightStickCommandBuilder.kt) (blob `c11638d25ecf83a6d1eeef6334b42898a6b03ae8`), independently implemented with AES-128-ECB and checked against captured red/green/blue/off packets. See `NOTICE.md` for attribution.
+
+## License
+
+Released under [GPL-3.0](LICENSE), matching the upstream protocol reference. This is an unofficial personal project and is not affiliated with Ado or Ado's official merchandise makers.

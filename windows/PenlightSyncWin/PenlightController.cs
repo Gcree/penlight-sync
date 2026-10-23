@@ -21,19 +21,25 @@ internal sealed class LampInfo
 }
 
 /// <summary>
-/// Windows counterpart of the macOS PenlightController: same target-name check, write-with-response pacing
-/// (at most 4 samples/writes per second, only changed colors) and 8-second watchdogs.
+/// Windows counterpart of the macOS PenlightController: same target-name check, write-with-response,
+/// LightEngine fade/breath rendering (only changed colors are written) and 8-second watchdogs.
 /// All public state is read and changed on the UI thread; <see cref="Changed"/> fires there too.
 /// </summary>
 internal sealed class PenlightController : IDisposable
 {
-    private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan SampleInterval = TimeSpan.FromMilliseconds(200);
+    /// <summary>Output frame rate; each frame writes only if the color changed and the previous write was acknowledged.</summary>
+    private static readonly TimeSpan RenderInterval = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ScanDuration = TimeSpan.FromSeconds(10);
 
     private readonly SynchronizationContext _ui;
     private readonly string _settingsPath;
+    private readonly string _effectsPath;
+    private LightEngine _engine;
+    private double _fadeTime = 0.6;
+    private bool _breathing;
     private readonly string _logPath;
     private readonly List<LampInfo> _lamps = new();
     private readonly List<string> _log = new();
@@ -53,8 +59,20 @@ internal sealed class PenlightController : IDisposable
         Directory.CreateDirectory(dataDir);
         _settingsPath = Path.Combine(dataDir, "selected-lamp.txt");
         _logPath = Path.Combine(dataDir, "latest.log");
+        _effectsPath = Path.Combine(dataDir, "effects.txt");
         try
         {
+            if (File.Exists(_effectsPath))
+            {
+                foreach (var line in File.ReadAllLines(_effectsPath))
+                {
+                    var parts = line.Split('=', 2);
+                    if (parts.Length != 2) continue;
+                    if (parts[0] == "fade" && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var fade))
+                        _fadeTime = Math.Clamp(fade, 0, 2);
+                    else if (parts[0] == "breathing") _breathing = parts[1] == "1";
+                }
+            }
             if (File.Exists(_settingsPath) && ulong.TryParse(File.ReadAllText(_settingsPath).Trim(), System.Globalization.NumberStyles.HexNumber, null, out var saved))
             {
                 _selectedAddress = saved;
@@ -62,6 +80,7 @@ internal sealed class PenlightController : IDisposable
             }
         }
         catch (IOException) { }
+        _engine = new LightEngine(_fadeTime, _breathing);
     }
 
     public event Action? Changed;
@@ -77,6 +96,35 @@ internal sealed class PenlightController : IDisposable
     public string? ErrorMessage { get; private set; }
     public string LogPath => _logPath;
     public bool CanStart => BluetoothReady && Phase == Phase.Idle && _selectedAddress != null;
+
+    /// <summary>Seconds to cover ~95% of a color change; 0 switches instantly. Applies live while syncing.</summary>
+    public double FadeTime
+    {
+        get => _fadeTime;
+        set
+        {
+            _fadeTime = Math.Clamp(value, 0, 2);
+            _engine.FadeTime = _fadeTime;
+            SaveEffects();
+        }
+    }
+
+    public bool Breathing
+    {
+        get => _breathing;
+        set
+        {
+            _breathing = value;
+            _engine.Breathing = value;
+            SaveEffects();
+        }
+    }
+
+    private void SaveEffects()
+    {
+        var fade = _fadeTime.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        try { File.WriteAllText(_effectsPath, $"fade={fade}\nbreathing={(_breathing ? 1 : 0)}\n"); } catch (IOException) { }
+    }
 
     public ulong? SelectedAddress
     {
@@ -199,6 +247,7 @@ internal sealed class PenlightController : IDisposable
         Phase = Phase.Connecting;
         ScreenColor = null;
         LampColor = null;
+        _engine = new LightEngine(_fadeTime, _breathing);
         Status = "連線中…";
         Log($"連線 {PenlightProtocol.TargetName}（{LampInfo.FormatAddress(address)}）。");
         Notify();
@@ -229,11 +278,12 @@ internal sealed class PenlightController : IDisposable
 
             if (Phase != Phase.Connecting) return; // Stopped while connecting.
             Phase = Phase.Syncing;
-            Status = "連動中：跟隨主螢幕主色（每秒最多 4 次）。";
+            Status = "連動中：跟隨主螢幕平均色。";
             Log("連動開始。");
             Notify();
             _syncCts = new CancellationTokenSource();
-            _syncTask = RunSyncLoopAsync(characteristic, _syncCts.Token);
+            var token = _syncCts.Token;
+            _syncTask = Task.WhenAll(RunLoopAsync(SampleLoopAsync(token), token), RunLoopAsync(RenderLoopAsync(characteristic, token), token));
         }
         catch (TimeoutException)
         {
@@ -251,50 +301,12 @@ internal sealed class PenlightController : IDisposable
 
     public Task StopAsync() => Phase is Phase.Connecting or Phase.Syncing ? ShutDownAsync(null) : Task.CompletedTask;
 
-    private async Task RunSyncLoopAsync(GattCharacteristic characteristic, CancellationToken token)
+    /// <summary>Turns a loop failure into a shutdown with its message; cancellation is a normal stop.</summary>
+    private async Task RunLoopAsync(Task loop, CancellationToken token)
     {
-        using var sampler = new ScreenSampler();
         try
         {
-            while (!token.IsCancellationRequested)
-            {
-                var started = DateTime.UtcNow;
-                Rgb color;
-                try
-                {
-                    color = await Task.Run(sampler.Sample, token).WaitAsync(OperationTimeout, token);
-                }
-                catch (TimeoutException)
-                {
-                    throw new SyncException("螢幕取樣超過 8 秒沒有完成，已停止連動。");
-                }
-                catch (Exception error) when (error is not OperationCanceledException)
-                {
-                    throw new SyncException($"螢幕取樣失敗：{error.Message}");
-                }
-                ScreenColor = color;
-                if (color != LampColor)
-                {
-                    var writer = new DataWriter();
-                    writer.WriteBytes(PenlightProtocol.Encode(color));
-                    GattWriteResult result;
-                    try
-                    {
-                        result = await characteristic.WriteValueWithResultAsync(writer.DetachBuffer(), GattWriteOption.WriteWithResponse)
-                            .AsTask().WaitAsync(OperationTimeout, token);
-                    }
-                    catch (TimeoutException)
-                    {
-                        throw new SyncException("藍牙寫入超過 8 秒沒有回應，已停止連動。請確認手燈仍在附近。");
-                    }
-                    if (result.Status != GattCommunicationStatus.Success)
-                        throw new SyncException($"藍牙寫入失敗（{result.Status}）。");
-                    LampColor = color;
-                }
-                Notify();
-                var remaining = SampleInterval - (DateTime.UtcNow - started);
-                if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token);
-            }
+            await loop;
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -306,6 +318,66 @@ internal sealed class PenlightController : IDisposable
         catch (Exception error)
         {
             _ = ShutDownAsync($"連動錯誤：{error.Message}");
+        }
+    }
+
+    private async Task SampleLoopAsync(CancellationToken token)
+    {
+        using var sampler = new ScreenSampler();
+        while (!token.IsCancellationRequested)
+        {
+            var started = DateTime.UtcNow;
+            Rgb color;
+            try
+            {
+                color = await Task.Run(sampler.Sample, token).WaitAsync(OperationTimeout, token);
+            }
+            catch (TimeoutException)
+            {
+                throw new SyncException("螢幕取樣超過 8 秒沒有完成，已停止連動。");
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                throw new SyncException($"螢幕取樣失敗：{error.Message}");
+            }
+            ScreenColor = color;
+            _engine.SetTarget(color);
+            Notify();
+            var remaining = SampleInterval - (DateTime.UtcNow - started);
+            if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token);
+        }
+    }
+
+    /// <summary>Advances the fade/breath effect and writes each frame that differs from the lamp's acknowledged color.</summary>
+    private async Task RenderLoopAsync(GattCharacteristic characteristic, CancellationToken token)
+    {
+        var last = DateTime.UtcNow;
+        while (!token.IsCancellationRequested)
+        {
+            var now = DateTime.UtcNow;
+            var frame = _engine.Step((now - last).TotalSeconds);
+            last = now;
+            if (frame is { } color && color != LampColor)
+            {
+                var writer = new DataWriter();
+                writer.WriteBytes(PenlightProtocol.Encode(color));
+                GattWriteResult result;
+                try
+                {
+                    result = await characteristic.WriteValueWithResultAsync(writer.DetachBuffer(), GattWriteOption.WriteWithResponse)
+                        .AsTask().WaitAsync(OperationTimeout, token);
+                }
+                catch (TimeoutException)
+                {
+                    throw new SyncException("藍牙寫入超過 8 秒沒有回應，已停止連動。請確認手燈仍在附近。");
+                }
+                if (result.Status != GattCommunicationStatus.Success)
+                    throw new SyncException($"藍牙寫入失敗（{result.Status}）。");
+                LampColor = color;
+                Notify();
+            }
+            var remaining = RenderInterval - (DateTime.UtcNow - now);
+            if (remaining > TimeSpan.Zero) await Task.Delay(remaining, token);
         }
     }
 

@@ -7,7 +7,7 @@ mkdir -p -- "$log_dir" || exit 1
 log_file="$log_dir/latest.log"
 print 'Ado 手燈螢幕連動'
 print '請關閉手機上的 Ado App，並長按手燈背面按鈕至藍燈閃爍。'
-print '連上後會跟隨主螢幕的主色。按 Control-C 停止；最長執行一小時。'
+print '連上後會跟隨主螢幕的平均色。按 Control-C 停止；最長執行一小時。'
 print '若系統要求權限，請允許藍牙與螢幕錄製。'
 print "執行記錄：$log_file"
 print "啟動時間：$(/bin/date '+%Y-%m-%d %H:%M:%S %z')" >> "$log_file"

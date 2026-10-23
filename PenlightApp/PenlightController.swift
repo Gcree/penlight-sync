@@ -5,6 +5,8 @@ import Foundation
 private let targetName = "Ado Light Stick"
 private let controlUUID = CBUUID(string: "0000")
 private let selectedLampKey = "selectedLampID"
+private let fadeTimeKey = "fadeTime"
+private let breathingKey = "breathing"
 
 struct DiscoveredLamp: Identifiable, Equatable {
     let id: UUID
@@ -12,8 +14,8 @@ struct DiscoveredLamp: Identifiable, Equatable {
     var remembered: Bool
 }
 
-/// GUI counterpart of the CLI's BLESession: same target checks, write-with-response pacing and watchdogs,
-/// but long-lived and driven by buttons instead of command-line options.
+/// GUI counterpart of the CLI's BLESession: same target checks, write-with-response and watchdogs,
+/// but long-lived, driven by buttons, and rendering a smoothed color stream through LightEngine.
 final class PenlightController: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     enum Phase: Equatable {
         case idle
@@ -22,7 +24,9 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         case stopping
     }
 
-    static let sampleInterval: TimeInterval = 0.25
+    static let sampleInterval: TimeInterval = 0.2
+    /// Output frame rate; each frame writes only if the color changed and the previous write was acknowledged.
+    static let renderInterval: TimeInterval = 0.05
     static let operationTimeout: TimeInterval = 8
     static let connectTimeout: TimeInterval = 15
     static let scanDuration: TimeInterval = 10
@@ -32,6 +36,18 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published private(set) var lamps: [DiscoveredLamp] = []
     @Published var selectedLampID: UUID? {
         didSet { UserDefaults.standard.set(selectedLampID?.uuidString, forKey: selectedLampKey) }
+    }
+    @Published var fadeTime: TimeInterval {
+        didSet {
+            engine.fadeTime = fadeTime
+            UserDefaults.standard.set(fadeTime, forKey: fadeTimeKey)
+        }
+    }
+    @Published var breathing: Bool {
+        didSet {
+            engine.breathing = breathing
+            UserDefaults.standard.set(breathing, forKey: breathingKey)
+        }
     }
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var screenColor: ScreenRGB?
@@ -47,15 +63,23 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private var characteristic: CBCharacteristic?
     private var scanStopWork: DispatchWorkItem?
     private var connectTimeoutWork: DispatchWorkItem?
-    private var syncTimer: Timer?
+    private var sampleTimer: Timer?
+    private var renderTimer: Timer?
+    private var engine: LightEngine
+    private var lastRenderAt: TimeInterval?
     private var sampleTask: Task<Void, Never>?
     private var sampleStartedAt: TimeInterval?
     private var writeStartedAt: TimeInterval?
-    private var lastWriteAt: TimeInterval?
     private var pendingRGB: ScreenRGB?
     private var stopReason: String?
 
     override init() {
+        let defaults = UserDefaults.standard
+        let savedFade = defaults.object(forKey: fadeTimeKey) as? Double ?? 0.6
+        let savedBreathing = defaults.bool(forKey: breathingKey)
+        fadeTime = savedFade
+        breathing = savedBreathing
+        engine = LightEngine(fadeTime: savedFade, breathing: savedBreathing)
         super.init()
         if let saved = UserDefaults.standard.string(forKey: selectedLampKey) {
             selectedLampID = UUID(uuidString: saved)
@@ -120,7 +144,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         stopReason = nil
         screenColor = nil
         lampColor = nil
-        lastWriteAt = nil
+        engine = LightEngine(fadeTime: fadeTime, breathing: breathing)
+        lastRenderAt = nil
         phase = .connecting
         status = "連線中…"
         log("連線 \(targetName)（\(id.uuidString)）。")
@@ -237,10 +262,13 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         connectTimeoutWork?.cancel()
         characteristic = found
         phase = .syncing
-        status = "連動中：跟隨主螢幕主色（每秒最多 4 次）。"
+        status = "連動中：跟隨主螢幕平均色。"
         log("連動開始。")
-        syncTimer = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
+        sampleTimer = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
             self?.tick()
+        }
+        renderTimer = Timer.scheduledTimer(withTimeInterval: Self.renderInterval, repeats: true) { [weak self] _ in
+            self?.render()
         }
     }
 
@@ -254,7 +282,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             return
         }
         if let color { lampColor = color }
-        if phase == .stopping { beginDisconnect() }
+        if phase == .stopping, sampleStartedAt == nil { beginDisconnect() }
     }
 
     // MARK: - Sync loop
@@ -270,7 +298,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             shutDown(reason: "藍牙寫入超過 8 秒沒有回應，已停止連動。請確認手燈仍在附近。")
             return
         }
-        guard sampleStartedAt == nil, writeStartedAt == nil else { return }
+        guard sampleStartedAt == nil else { return }
         sampleStartedAt = now
         sampleTask = Task { @MainActor [weak self] in
             do {
@@ -286,18 +314,28 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         sampleStartedAt = nil
         sampleTask = nil
         guard phase == .syncing else {
-            if phase == .stopping { beginDisconnect() }
+            if phase == .stopping, writeStartedAt == nil { beginDisconnect() }
             return
         }
         screenColor = color
-        guard color != lampColor, let peripheral, let characteristic else { return }
+        engine.setTarget(color)
+    }
+
+    /// Advances the fade/breath effect and writes the frame when it differs from the lamp's acknowledged color.
+    private func render() {
+        guard phase == .syncing else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if let last = lastWriteAt, now - last < Self.sampleInterval { return }
+        let dt = lastRenderAt.map { now - $0 } ?? 0
+        lastRenderAt = now
+        guard let frame = engine.step(dt: dt),
+              writeStartedAt == nil,
+              frame != lampColor,
+              let peripheral,
+              let characteristic else { return }
         do {
-            let payload = try PenlightProtocol.encode(rgb: color)
-            lastWriteAt = now
+            let payload = try PenlightProtocol.encode(rgb: frame)
             writeStartedAt = now
-            pendingRGB = color
+            pendingRGB = frame
             peripheral.writeValue(payload, for: characteristic, type: .withResponse)
         } catch {
             shutDown(reason: "無法編碼顏色指令：\(error.localizedDescription)")
@@ -307,7 +345,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private func sampleFailed(_ error: Error) {
         sampleStartedAt = nil
         sampleTask = nil
-        if phase == .stopping { beginDisconnect(); return }
+        if phase == .stopping {
+            if writeStartedAt == nil { beginDisconnect() }
+            return
+        }
         guard phase == .syncing else { return }
         if case ScreenColorError.screenCapturePermissionDenied = error { needsScreenPermission = true }
         shutDown(reason: "螢幕取樣失敗：\(error.localizedDescription)")
@@ -331,8 +372,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         stopReason = reason
         phase = .stopping
         status = "停止中…"
-        syncTimer?.invalidate()
-        syncTimer = nil
+        sampleTimer?.invalidate()
+        sampleTimer = nil
+        renderTimer?.invalidate()
+        renderTimer = nil
         connectTimeoutWork?.cancel()
         if writeStartedAt == nil, sampleStartedAt == nil {
             beginDisconnect()

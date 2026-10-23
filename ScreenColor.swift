@@ -76,7 +76,7 @@ public struct ScreenColorSampler {
             return true
         }
 
-        guard rendered, let color = Self.dominantColor(
+        guard rendered, let color = Self.averageColor(
             pixels: Array(rgba),
             width: width,
             height: height,
@@ -87,8 +87,9 @@ public struct ScreenColorSampler {
         return color
     }
 
-    /// Reads 8-bit RGBA rows. Returns nil for malformed or empty buffers.
-    public static func dominantColor(
+    /// Average color of 8-bit premultiplied RGBA rows. Transparent pixels are skipped.
+    /// Returns nil for malformed or fully transparent buffers.
+    public static func averageColor(
         pixels: [UInt8],
         width: Int,
         height: Int,
@@ -101,50 +102,24 @@ public struct ScreenColorSampler {
         let requiredBytes = (height - 1) * bytesPerRow + rowBytes
         guard pixels.count >= requiredBytes else { return nil }
 
-        var counts = [Int](repeating: 0, count: 4096)
-        var scores = [Double](repeating: 0, count: 4096)
-        var redSums = [Int](repeating: 0, count: 4096)
-        var greenSums = [Int](repeating: 0, count: 4096)
-        var blueSums = [Int](repeating: 0, count: 4096)
-        var chromaticPixels = 0
-
+        var redSum = 0, greenSum = 0, blueSum = 0, count = 0
         for y in 0..<height {
             let row = y * bytesPerRow
             for x in 0..<width {
                 let offset = row + x * 4
                 let alpha = Int(pixels[offset + 3])
                 guard alpha > 0 else { continue }
-                let red = min(255, Int(pixels[offset]) * 255 / alpha)
-                let green = min(255, Int(pixels[offset + 1]) * 255 / alpha)
-                let blue = min(255, Int(pixels[offset + 2]) * 255 / alpha)
-                let maximum = max(red, green, blue)
-                let minimum = min(red, green, blue)
-                let saturation = maximum == 0 ? 0.0 : Double(maximum - minimum) / Double(maximum)
-                let brightness = Double(maximum) / 255.0
-                if saturation > 0.08 { chromaticPixels += 1 }
-
-                let bin = (red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4)
-                counts[bin] += 1
-                redSums[bin] += red
-                greenSums[bin] += green
-                blueSums[bin] += blue
-                // Favor bright, saturated screen colors while keeping grayscale pixels count-weighted.
-                scores[bin] += 1.0 + 2.5 * saturation * brightness
+                redSum += min(255, Int(pixels[offset]) * 255 / alpha)
+                greenSum += min(255, Int(pixels[offset + 1]) * 255 / alpha)
+                blueSum += min(255, Int(pixels[offset + 2]) * 255 / alpha)
+                count += 1
             }
         }
-
-        guard let bestBin = counts.indices.max(by: { left, right in
-            let leftScore = chromaticPixels == 0 ? Double(counts[left]) : scores[left]
-            let rightScore = chromaticPixels == 0 ? Double(counts[right]) : scores[right]
-            return leftScore < rightScore
-        }), counts[bestBin] > 0 else {
-            return nil
-        }
-        let count = counts[bestBin]
+        guard count > 0 else { return nil }
         return ScreenRGB(
-            red: UInt8((redSums[bestBin] + count / 2) / count),
-            green: UInt8((greenSums[bestBin] + count / 2) / count),
-            blue: UInt8((blueSums[bestBin] + count / 2) / count)
+            red: UInt8((redSum + count / 2) / count),
+            green: UInt8((greenSum + count / 2) / count),
+            blue: UInt8((blueSum + count / 2) / count)
         )
     }
 }

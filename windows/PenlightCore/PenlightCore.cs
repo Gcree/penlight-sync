@@ -38,10 +38,11 @@ public static class PenlightProtocol
     }
 }
 
-/// <summary>Port of ScreenColorSampler.dominantColor in ScreenColor.swift.</summary>
-public static class DominantColor
+/// <summary>Port of ScreenColorSampler.averageColor in ScreenColor.swift.</summary>
+public static class AverageColor
 {
-    /// Reads 8-bit RGBA (or BGRA when <paramref name="bgra"/> is true) rows. Returns null for malformed or empty buffers.
+    /// Average of 8-bit premultiplied RGBA (or BGRA when <paramref name="bgra"/> is true) rows.
+    /// Transparent pixels are skipped. Returns null for malformed or fully transparent buffers.
     public static Rgb? Find(byte[] pixels, int width, int height, int bytesPerRow, bool bgra = false)
     {
         if (width <= 0 || height <= 0 || width > int.MaxValue / 4) return null;
@@ -50,14 +51,8 @@ public static class DominantColor
         var requiredBytes = (height - 1) * bytesPerRow + rowBytes;
         if (pixels.Length < requiredBytes) return null;
 
-        var counts = new int[4096];
-        var scores = new double[4096];
-        var redSums = new int[4096];
-        var greenSums = new int[4096];
-        var blueSums = new int[4096];
-        var chromaticPixels = 0;
         int redOffset = bgra ? 2 : 0, blueOffset = bgra ? 0 : 2;
-
+        long redSum = 0, greenSum = 0, blueSum = 0, count = 0;
         for (var y = 0; y < height; y++)
         {
             var row = y * bytesPerRow;
@@ -66,37 +61,75 @@ public static class DominantColor
                 var offset = row + x * 4;
                 int alpha = pixels[offset + 3];
                 if (alpha == 0) continue;
-                var red = Math.Min(255, pixels[offset + redOffset] * 255 / alpha);
-                var green = Math.Min(255, pixels[offset + 1] * 255 / alpha);
-                var blue = Math.Min(255, pixels[offset + blueOffset] * 255 / alpha);
-                var maximum = Math.Max(red, Math.Max(green, blue));
-                var minimum = Math.Min(red, Math.Min(green, blue));
-                var saturation = maximum == 0 ? 0.0 : (double)(maximum - minimum) / maximum;
-                var brightness = maximum / 255.0;
-                if (saturation > 0.08) chromaticPixels++;
-
-                var bin = (red >> 4) << 8 | (green >> 4) << 4 | (blue >> 4);
-                counts[bin]++;
-                redSums[bin] += red;
-                greenSums[bin] += green;
-                blueSums[bin] += blue;
-                // Favor bright, saturated screen colors while keeping grayscale pixels count-weighted.
-                scores[bin] += 1.0 + 2.5 * saturation * brightness;
+                redSum += Math.Min(255, pixels[offset + redOffset] * 255 / alpha);
+                greenSum += Math.Min(255, pixels[offset + 1] * 255 / alpha);
+                blueSum += Math.Min(255, pixels[offset + blueOffset] * 255 / alpha);
+                count++;
             }
         }
-
-        var best = 0;
-        for (var bin = 1; bin < 4096; bin++)
-        {
-            var current = chromaticPixels == 0 ? counts[bin] : scores[bin];
-            var leader = chromaticPixels == 0 ? counts[best] : scores[best];
-            if (current > leader) best = bin; // Ties keep the earlier bin, matching Swift's max(by:).
-        }
-        var count = counts[best];
         if (count == 0) return null;
         return new Rgb(
-            (byte)((redSums[best] + count / 2) / count),
-            (byte)((greenSums[best] + count / 2) / count),
-            (byte)((blueSums[best] + count / 2) / count));
+            (byte)((redSum + count / 2) / count),
+            (byte)((greenSum + count / 2) / count),
+            (byte)((blueSum + count / 2) / count));
+    }
+}
+
+/// <summary>
+/// Port of LightEngine.swift: an exponential fade toward the latest screen sample, plus an optional slow
+/// brightness "breath" that only appears while the color is steady, so it never fights the video's own changes.
+/// </summary>
+public sealed class LightEngine
+{
+    public const double BreathPeriod = 4;
+    /// <summary>Brightness dips to 70% at the bottom of each breath.</summary>
+    public const double BreathDepth = 0.3;
+    /// <summary>RGB distance below which the faded color counts as steady enough to breathe.</summary>
+    public const double SteadyDistance = 24;
+    /// <summary>How quickly breathing fades in or out after the color settles or changes.</summary>
+    public const double BreathRamp = 0.8;
+
+    private double[]? _target;
+    private readonly double[] _current = new double[3];
+    private double _breathLevel;
+    private double _phase;
+
+    public LightEngine(double fadeTime, bool breathing)
+    {
+        FadeTime = fadeTime;
+        Breathing = breathing;
+    }
+
+    /// <summary>Seconds to cover ~95% of the way to a new color; 0 switches instantly.</summary>
+    public double FadeTime { get; set; }
+    public bool Breathing { get; set; }
+
+    public void SetTarget(Rgb rgb)
+    {
+        double[] next = { rgb.Red, rgb.Green, rgb.Blue };
+        if (_target == null) next.CopyTo(_current, 0); // The first sample shows immediately instead of fading in from black.
+        _target = next;
+    }
+
+    /// <summary>Advances the effect by <paramref name="dt"/> seconds. Returns null until the first sample arrives.</summary>
+    public Rgb? Step(double dt)
+    {
+        if (_target == null) return null;
+        dt = Math.Max(0, dt);
+        var k = FadeTime <= 0 ? 1 : 1 - Math.Exp(-3 * dt / FadeTime);
+        double distanceSquared = 0;
+        for (var i = 0; i < 3; i++)
+        {
+            _current[i] += (_target[i] - _current[i]) * k;
+            distanceSquared += (_target[i] - _current[i]) * (_target[i] - _current[i]);
+        }
+
+        var wanted = Breathing && Math.Sqrt(distanceSquared) < SteadyDistance ? 1.0 : 0.0;
+        _breathLevel += (wanted - _breathLevel) * (1 - Math.Exp(-dt / BreathRamp));
+        _phase = (_phase + dt / BreathPeriod) % 1;
+        var scale = 1 - BreathDepth * _breathLevel * (0.5 - 0.5 * Math.Cos(2 * Math.PI * _phase));
+
+        byte Channel(int i) => (byte)Math.Clamp(Math.Round(_current[i] * scale, MidpointRounding.AwayFromZero), 0, 255);
+        return new Rgb(Channel(0), Channel(1), Channel(2));
     }
 }
