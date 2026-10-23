@@ -1,0 +1,15 @@
+# Build outputs (published as GitHub Release assets instead)
+dist/
+/PenlightSync
+/ScreenColorTests
+windows/**/bin/
+windows/**/obj/
+
+# Per-Mac CoreBluetooth identifier for the CLI launcher
+device-id.txt
+
+.DS_Store
+__pycache__/
+
+# Local agent tooling
+.jev-dev.json
