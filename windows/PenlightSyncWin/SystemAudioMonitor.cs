@@ -5,12 +5,12 @@ namespace PenlightSync.Win;
 
 /// <summary>
 /// Windows counterpart of SystemAudioMonitor.swift: listens to the default output device with WASAPI loopback
-/// (no extra permission) and reports detected beats on the UI thread. Audio is analyzed in memory only.
+/// (no extra permission) and reports detected beats (strength, current tempo) on the UI thread. Audio is analyzed in memory only.
 /// </summary>
 internal sealed class SystemAudioMonitor : IDisposable
 {
     private readonly SynchronizationContext _ui;
-    private readonly Action<double> _onBeat;
+    private readonly Action<double, double?> _onBeat;
     private readonly Action<string> _onFailure;
     private readonly WasapiLoopbackCapture _capture = new();
     private readonly BeatDetector _detector;
@@ -20,7 +20,7 @@ internal sealed class SystemAudioMonitor : IDisposable
     private float[] _mono = Array.Empty<float>();
     private bool _stopping;
 
-    public SystemAudioMonitor(SynchronizationContext ui, Action<double> onBeat, Action<string> onFailure)
+    public SystemAudioMonitor(SynchronizationContext ui, Action<double, double?> onBeat, Action<string> onFailure)
     {
         _ui = ui;
         _onBeat = onBeat;
@@ -56,7 +56,8 @@ internal sealed class SystemAudioMonitor : IDisposable
             _mono[frame] = sum / _channels;
         }
         var beats = _detector.Process(_mono.AsSpan(0, frames));
-        if (beats.Count > 0) _ui.Post(_ => beats.ForEach(_onBeat), null);
+        var bpm = _detector.Bpm;
+        if (beats.Count > 0) _ui.Post(_ => beats.ForEach(strength => _onBeat(strength, bpm)), null);
     }
 
     private void OnStopped(object? sender, StoppedEventArgs args)

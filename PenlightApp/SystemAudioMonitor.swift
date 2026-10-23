@@ -4,17 +4,17 @@ import Foundation
 import ScreenCaptureKit
 
 /// Listens to system audio output with ScreenCaptureKit (same Screen & System Audio Recording permission
-/// as screen sampling) and reports detected beats on the main queue. Audio is analyzed in memory only.
+/// as screen sampling) and reports detected beats (strength, current tempo) on the main queue. Audio is analyzed in memory only.
 final class SystemAudioMonitor: NSObject, SCStreamOutput, SCStreamDelegate {
     private static let sampleRate = 48_000
 
-    private let onBeat: (Double) -> Void
+    private let onBeat: (Double, Double?) -> Void
     private let onFailure: (Error) -> Void
     private let queue = DispatchQueue(label: "penlight.audio")
     private var detector = BeatDetector(sampleRate: Double(sampleRate))
     private var stream: SCStream?
 
-    init(onBeat: @escaping (Double) -> Void, onFailure: @escaping (Error) -> Void) {
+    init(onBeat: @escaping (Double, Double?) -> Void, onFailure: @escaping (Error) -> Void) {
         self.onBeat = onBeat
         self.onFailure = onFailure
     }
@@ -54,6 +54,7 @@ final class SystemAudioMonitor: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, sampleBuffer.isValid else { return }
         var beats: [Double] = []
+        var bpm: Double?
         try? sampleBuffer.withAudioBufferList { bufferList, _ in
             // ScreenCaptureKit delivers 32-bit float PCM; with one channel the first buffer holds all samples.
             guard let buffer = bufferList.first, let data = buffer.mData else { return }
@@ -62,9 +63,10 @@ final class SystemAudioMonitor: NSObject, SCStreamOutput, SCStreamDelegate {
                 count: Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
             )
             beats = detector.process(samples)
+            bpm = detector.bpm
         }
         guard !beats.isEmpty else { return }
-        DispatchQueue.main.async { [onBeat] in beats.forEach(onBeat) }
+        DispatchQueue.main.async { [onBeat] in beats.forEach { onBeat($0, bpm) } }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

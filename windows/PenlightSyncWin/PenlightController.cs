@@ -7,7 +7,8 @@ using Windows.Storage.Streams;
 
 namespace PenlightSync.Win;
 
-internal enum Phase { Idle, Connecting, Syncing, Stopping }
+/// <summary>Reconnecting: the link dropped while syncing and the controller is retrying on its own.</summary>
+internal enum Phase { Idle, Connecting, Syncing, Reconnecting, Stopping }
 
 internal sealed class LampInfo
 {
@@ -22,7 +23,8 @@ internal sealed class LampInfo
 
 /// <summary>
 /// Windows counterpart of the macOS PenlightController: same target-name check, write-with-response,
-/// LightEngine effects rendering (only changed colors are written), optional beat sync and 8-second watchdogs.
+/// LightEngine effects rendering (only changed colors are written), optional beat sync, 8-second watchdogs,
+/// and automatic reconnection for up to <see cref="ReconnectWindow"/> when the lamp drops the link.
 /// All public state is read and changed on the UI thread; <see cref="Changed"/> fires there too.
 /// </summary>
 internal sealed class PenlightController : IDisposable
@@ -33,6 +35,7 @@ internal sealed class PenlightController : IDisposable
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ScanDuration = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ReconnectWindow = TimeSpan.FromSeconds(30);
 
     private readonly SynchronizationContext _ui;
     private readonly string _settingsPath;
@@ -44,6 +47,7 @@ internal sealed class PenlightController : IDisposable
     private double _minBrightness;
     private bool _sceneCuts = true;
     private bool _beatSync;
+    private RectangleF? _region;
     private SystemAudioMonitor? _audio;
     private readonly string _logPath;
     private readonly List<LampInfo> _lamps = new();
@@ -82,6 +86,11 @@ internal sealed class PenlightController : IDisposable
                         case "breathing": _breathing = parts[1] == "1"; break;
                         case "sceneCuts": _sceneCuts = parts[1] == "1"; break;
                         case "beatSync": _beatSync = parts[1] == "1"; break;
+                        case "region":
+                            var values = parts[1].Split(',').Select(v => double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : -1).ToArray();
+                            if (values.Length == 4 && values.All(v => v is >= 0 and <= 1) && values[2] > 0 && values[3] > 0)
+                                _region = new RectangleF((float)values[0], (float)values[1], (float)values[2], (float)values[3]);
+                            break;
                     }
                 }
             }
@@ -113,6 +122,8 @@ internal sealed class PenlightController : IDisposable
     public string? ErrorMessage { get; private set; }
     /// <summary>True while beats in the system audio are shaping the light.</summary>
     public bool MusicDetected { get; private set; }
+    /// <summary>The music's tempo (rounded BPM) while beat sync is shaping the light.</summary>
+    public int? Bpm { get; private set; }
     public string LogPath => _logPath;
     public bool CanStart => BluetoothReady && Phase == Phase.Idle && _selectedAddress != null;
 
@@ -174,6 +185,22 @@ internal sealed class PenlightController : IDisposable
         }
     }
 
+    /// <summary>Area of the primary screen to sample (normalized 0–1, top-left origin); null is the whole screen.</summary>
+    public RectangleF? Region
+    {
+        get => _region;
+        set
+        {
+            _region = value;
+            SaveEffects();
+            Log(value is { } r ? $"取色範圍改為框選區域（寬 {r.Width * 100:0}%、高 {r.Height * 100:0}%）。" : "取色範圍改回整個主螢幕。");
+            if (Phase == Phase.Syncing) Status = SyncingStatus;
+            Notify();
+        }
+    }
+
+    private string SyncingStatus => _region == null ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。";
+
     /// <summary>Pulses the lamp on beats in the system audio; starts or stops listening live while syncing.</summary>
     public bool BeatSync
     {
@@ -183,7 +210,7 @@ internal sealed class PenlightController : IDisposable
             _beatSync = value;
             _engine.BeatSync = value;
             SaveEffects();
-            if (Phase != Phase.Syncing) return;
+            if (Phase is not (Phase.Syncing or Phase.Reconnecting)) return;
             if (value) StartAudio(); else StopAudio();
             Notify();
         }
@@ -195,6 +222,7 @@ internal sealed class PenlightController : IDisposable
         string Flag(bool value) => value ? "1" : "0";
         var text = $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
             + $"minBrightness={Number(_minBrightness)}\nsceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n";
+        if (_region is { } r) text += $"region={Number(r.X)},{Number(r.Y)},{Number(r.Width)},{Number(r.Height)}\n";
         try { File.WriteAllText(_effectsPath, text); } catch (IOException) { }
     }
 
@@ -203,7 +231,7 @@ internal sealed class PenlightController : IDisposable
         if (_audio != null) return;
         try
         {
-            _audio = new SystemAudioMonitor(_ui, strength => _engine.Beat(strength), AudioFailed);
+            _audio = new SystemAudioMonitor(_ui, (strength, bpm) => _engine.Beat(strength, bpm), AudioFailed);
             _audio.Start();
             Log("開始聆聽系統聲音（節拍）。");
         }
@@ -218,6 +246,7 @@ internal sealed class PenlightController : IDisposable
         _audio?.Dispose();
         _audio = null;
         MusicDetected = false;
+        Bpm = null;
     }
 
     /// <summary>Audio problems only turn off the beat effect; color sync keeps running.</summary>
@@ -357,54 +386,120 @@ internal sealed class PenlightController : IDisposable
         Notify();
         try
         {
-            var device = await BluetoothLEDevice.FromBluetoothAddressAsync(address).AsTask().WaitAsync(ConnectTimeout)
-                ?? throw new SyncException("找不到選擇的手燈。請讓手燈進入配對模式後重新掃描。");
-            _device = device;
-            if (!string.IsNullOrEmpty(device.Name) && device.Name != PenlightProtocol.TargetName)
-                throw new SyncException($"選擇的裝置名稱不是 {PenlightProtocol.TargetName}，已拒絕連線。");
-            device.ConnectionStatusChanged += OnConnectionStatusChanged;
-
-            var services = await device.GetGattServicesForUuidAsync(PenlightProtocol.ControlUuid, BluetoothCacheMode.Uncached)
-                .AsTask().WaitAsync(ConnectTimeout);
-            if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
-                throw new SyncException($"連線失敗或手燈沒有控制服務 0000（{services.Status}）。請讓手燈重新進入配對模式後再試。");
-            _service = services.Services[0];
-            Log("已連線，探索控制特徵 0000。");
-
-            var characteristics = await _service.GetCharacteristicsForUuidAsync(PenlightProtocol.ControlUuid, BluetoothCacheMode.Uncached)
-                .AsTask().WaitAsync(ConnectTimeout);
-            var characteristic = characteristics.Status == GattCommunicationStatus.Success
-                ? characteristics.Characteristics.FirstOrDefault()
-                : null;
-            if (characteristic == null || !characteristic.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Write))
-                throw new SyncException("手燈的控制特徵 0000 不支援有回應寫入。");
-            _characteristic = characteristic;
-
+            var characteristic = await ConnectAsync(address);
             if (Phase != Phase.Connecting) return; // Stopped while connecting.
             Phase = Phase.Syncing;
-            Status = "連動中：跟隨主螢幕平均色。";
+            Status = SyncingStatus;
             Log("連動開始。");
             if (_beatSync) StartAudio();
             Notify();
-            _syncCts = new CancellationTokenSource();
-            var token = _syncCts.Token;
-            _syncTask = Task.WhenAll(RunLoopAsync(SampleLoopAsync(token), token), RunLoopAsync(RenderLoopAsync(characteristic, token), token));
-        }
-        catch (TimeoutException)
-        {
-            await ShutDownAsync("連線逾時。請讓手燈重新進入配對模式後再試。");
-        }
-        catch (SyncException error)
-        {
-            await ShutDownAsync(error.Message);
+            BeginSync(characteristic);
         }
         catch (Exception error)
         {
-            await ShutDownAsync($"無法連線：{error.Message}");
+            await ShutDownAsync(ConnectFailure(error));
         }
     }
 
-    public Task StopAsync() => Phase is Phase.Connecting or Phase.Syncing ? ShutDownAsync(null) : Task.CompletedTask;
+    private static string ConnectFailure(Exception error) => error switch
+    {
+        TimeoutException => "連線逾時。請讓手燈重新進入配對模式後再試。",
+        SyncException => error.Message,
+        _ => $"無法連線：{error.Message}",
+    };
+
+    /// <summary>Opens the lamp and returns its control characteristic; the device is kept in <see cref="_device"/>.</summary>
+    private async Task<GattCharacteristic> ConnectAsync(ulong address)
+    {
+        var device = await BluetoothLEDevice.FromBluetoothAddressAsync(address).AsTask().WaitAsync(ConnectTimeout)
+            ?? throw new SyncException("找不到選擇的手燈。請讓手燈進入配對模式後重新掃描。");
+        _device = device;
+        if (!string.IsNullOrEmpty(device.Name) && device.Name != PenlightProtocol.TargetName)
+            throw new SyncException($"選擇的裝置名稱不是 {PenlightProtocol.TargetName}，已拒絕連線。");
+        device.ConnectionStatusChanged += OnConnectionStatusChanged;
+
+        var services = await device.GetGattServicesForUuidAsync(PenlightProtocol.ControlUuid, BluetoothCacheMode.Uncached)
+            .AsTask().WaitAsync(ConnectTimeout);
+        if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
+            throw new SyncException($"連線失敗或手燈沒有控制服務 0000（{services.Status}）。請讓手燈重新進入配對模式後再試。");
+        _service = services.Services[0];
+        Log("已連線，探索控制特徵 0000。");
+
+        var characteristics = await _service.GetCharacteristicsForUuidAsync(PenlightProtocol.ControlUuid, BluetoothCacheMode.Uncached)
+            .AsTask().WaitAsync(ConnectTimeout);
+        var characteristic = characteristics.Status == GattCommunicationStatus.Success
+            ? characteristics.Characteristics.FirstOrDefault()
+            : null;
+        if (characteristic == null || !characteristic.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Write))
+            throw new SyncException("手燈的控制特徵 0000 不支援有回應寫入。");
+        _characteristic = characteristic;
+        return characteristic;
+    }
+
+    private void BeginSync(GattCharacteristic characteristic)
+    {
+        _syncCts = new CancellationTokenSource();
+        var token = _syncCts.Token;
+        _syncTask = Task.WhenAll(RunLoopAsync(SampleLoopAsync(token), token), RunLoopAsync(RenderLoopAsync(characteristic, token), token));
+    }
+
+    /// <summary>
+    /// Stops the loops, drops the link and retries the connection until <see cref="ReconnectWindow"/> runs out.
+    /// The engine (current color and effects) and beat listening carry over.
+    /// </summary>
+    private async Task ReconnectAsync(string reason)
+    {
+        if (Phase != Phase.Syncing || _selectedAddress is not { } address) return;
+        Phase = Phase.Reconnecting;
+        LampColor = null; // Rewrite the current color as soon as the link is back.
+        Status = $"{reason}，正在自動重新連線（最多 {ReconnectWindow.TotalSeconds:0} 秒）…若一直連不上，請長按手燈背面按鈕進入配對模式。";
+        Log($"{reason}，自動重新連線中。");
+        Notify();
+        await StopLoopsAsync();
+        ReleaseDevice();
+
+        var deadline = DateTime.UtcNow + ReconnectWindow;
+        while (Phase == Phase.Reconnecting && DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                var characteristic = await ConnectAsync(address);
+                if (Phase != Phase.Reconnecting)
+                {
+                    if (Phase == Phase.Idle) ReleaseDevice(); // Stopped meanwhile.
+                    return;
+                }
+                Phase = Phase.Syncing;
+                Status = SyncingStatus;
+                Log("已自動重新連線，繼續連動。");
+                Notify();
+                BeginSync(characteristic);
+                return;
+            }
+            catch (Exception error)
+            {
+                if (Phase == Phase.Idle) ReleaseDevice();
+                if (Phase != Phase.Reconnecting) return;
+                ReleaseDevice();
+                Log($"重新連線失敗：{ConnectFailure(error)}");
+                await Task.Delay(TimeSpan.FromSeconds(1));
+            }
+        }
+        if (Phase == Phase.Reconnecting)
+            await ShutDownAsync($"{reason}，{ReconnectWindow.TotalSeconds:0} 秒內無法重新連上手燈。請讓手燈重新進入配對模式後再按「開始連動」。");
+    }
+
+    /// <summary>Cancels the sample and render loops, waiting a bounded time for an outstanding sample or write.</summary>
+    private async Task StopLoopsAsync()
+    {
+        _syncCts?.Cancel();
+        if (_syncTask is { } task && !task.IsCompleted) await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
+        _syncCts?.Dispose();
+        _syncCts = null;
+        _syncTask = null;
+    }
+
+    public Task StopAsync() => Phase is Phase.Connecting or Phase.Syncing or Phase.Reconnecting ? ShutDownAsync(null) : Task.CompletedTask;
 
     /// <summary>Turns a loop failure into a shutdown with its message; cancellation is a normal stop.</summary>
     private async Task RunLoopAsync(Task loop, CancellationToken token)
@@ -415,6 +510,10 @@ internal sealed class PenlightController : IDisposable
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
+        }
+        catch (LinkException error)
+        {
+            _ = ReconnectAsync(error.Message);
         }
         catch (SyncException error)
         {
@@ -435,7 +534,8 @@ internal sealed class PenlightController : IDisposable
             Rgb color;
             try
             {
-                color = await Task.Run(sampler.Sample, token).WaitAsync(OperationTimeout, token);
+                var region = _region;
+                color = await Task.Run(() => sampler.Sample(region), token).WaitAsync(OperationTimeout, token);
             }
             catch (TimeoutException)
             {
@@ -462,9 +562,11 @@ internal sealed class PenlightController : IDisposable
             var now = DateTime.UtcNow;
             var frame = _engine.Step((now - last).TotalSeconds);
             last = now;
-            if (_engine.MusicDetected != MusicDetected)
+            var bpm = _engine.Bpm is { } tempo ? (int)Math.Round(tempo) : (int?)null;
+            if (_engine.MusicDetected != MusicDetected || bpm != Bpm)
             {
                 MusicDetected = _engine.MusicDetected;
+                Bpm = bpm;
                 Notify();
             }
             if (frame is { } color && color != LampColor)
@@ -479,10 +581,14 @@ internal sealed class PenlightController : IDisposable
                 }
                 catch (TimeoutException)
                 {
-                    throw new SyncException("藍牙寫入超過 8 秒沒有回應，已停止連動。請確認手燈仍在附近。");
+                    throw new LinkException("藍牙寫入超過 8 秒沒有回應");
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    throw new LinkException($"藍牙寫入失敗（{error.Message}）");
                 }
                 if (result.Status != GattCommunicationStatus.Success)
-                    throw new SyncException($"藍牙寫入失敗（{result.Status}）。");
+                    throw new LinkException($"藍牙寫入失敗（{result.Status}）");
                 LampColor = color;
                 Notify();
             }
@@ -497,7 +603,7 @@ internal sealed class PenlightController : IDisposable
         _ui.Post(_ =>
         {
             if (sender != _device || Phase != Phase.Syncing) return;
-            _ = ShutDownAsync("手燈連線中斷。請讓手燈重新進入配對模式後再按「開始連動」。");
+            _ = ReconnectAsync("手燈連線中斷");
         }, null);
     }
 
@@ -508,16 +614,8 @@ internal sealed class PenlightController : IDisposable
         Phase = Phase.Stopping;
         Status = "停止中…";
         Notify();
-        _syncCts?.Cancel();
         StopAudio();
-        if (_syncTask is { } task && !task.IsCompleted)
-        {
-            // Bound the wait for an outstanding sample or write acknowledgement.
-            await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(3)));
-        }
-        _syncCts?.Dispose();
-        _syncCts = null;
-        _syncTask = null;
+        await StopLoopsAsync();
         ReleaseDevice();
         Phase = Phase.Idle;
         if (reason != null)
@@ -566,5 +664,8 @@ internal sealed class PenlightController : IDisposable
         ReleaseDevice();
     }
 
-    private sealed class SyncException(string message) : Exception(message);
+    private class SyncException(string message) : Exception(message);
+
+    /// <summary>A Bluetooth link failure while syncing; handled by reconnecting instead of stopping.</summary>
+    private sealed class LinkException(string message) : SyncException(message);
 }

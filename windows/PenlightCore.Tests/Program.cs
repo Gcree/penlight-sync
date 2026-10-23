@@ -174,8 +174,54 @@ for (var i = 0; i < kicks.Length; i++)
     var noise = (float)(random.NextDouble() * 0.004 - 0.002);
     kicks[i] = (t % 0.5 < 0.08 ? (float)(0.8 * Math.Sin(2 * Math.PI * 60 * t)) : 0) + noise;
 }
-var beats = new BeatDetector(rate).Process(kicks);
+var kickDetector = new BeatDetector(rate);
+var beats = kickDetector.Process(kicks);
 Check(beats.Count is >= 6 and <= 9, $"~8 kicks in 4 s at 120 BPM (got {beats.Count})");
+Check(kickDetector.Bpm is { } kickBpm && Math.Abs(kickBpm - 120) <= 4, $"~120 BPM (got {kickDetector.Bpm})");
+foreach (var tempo in new[] { 150.0, 90.0 })
+{
+    var period = 60 / tempo;
+    var samples = new float[(int)(rate * 6)];
+    for (var i = 0; i < samples.Length; i++)
+    {
+        var t = i / rate;
+        samples[i] = (t % period < 0.08 ? (float)(0.8 * Math.Sin(2 * Math.PI * 60 * t)) : 0) + (float)(random.NextDouble() * 0.004 - 0.002);
+    }
+    var tempoDetector = new BeatDetector(rate);
+    tempoDetector.Process(samples);
+    Check(tempoDetector.Bpm is { } found && Math.Abs(found - tempo) <= 5, $"~{tempo} BPM (got {tempoDetector.Bpm})");
+}
+
+// Tempo: fast songs fade quicker than slow ones; the tempo is reported only while beats arrive.
+int FadeProgress(double bpm)
+{
+    var tempoEngine = new LightEngine(0.6, breathing: false) { SceneCuts = false, BeatSync = true };
+    tempoEngine.SetTarget(red);
+    for (var i = 0; i < 40; i++)
+    {
+        if (i % 5 == 0) tempoEngine.Beat(1, bpm);
+        tempoEngine.Step(0.05);
+    }
+    Check(tempoEngine.Bpm == bpm, $"engine reports tempo while beats arrive ({tempoEngine.Bpm})");
+    tempoEngine.SetTarget(blue);
+    tempoEngine.Beat(1, bpm);
+    var frame = tempoEngine.Step(0.05)!.Value;
+    for (var i = 0; i < 3; i++) frame = tempoEngine.Step(0.05)!.Value;
+    return frame.Blue;
+}
+var fastProgress = FadeProgress(170);
+var slowProgress = FadeProgress(75);
+Check(fastProgress > slowProgress + 20, $"fast songs fade quicker (fast {fastProgress}, slow {slowProgress})");
+var clearing = new LightEngine(0.6, breathing: false) { BeatSync = true };
+clearing.SetTarget(white);
+for (var i = 0; i < 40; i++)
+{
+    if (i % 10 == 0) clearing.Beat(1, 120);
+    clearing.Step(0.05);
+}
+Check(clearing.Bpm == 120, "tempo reported while music plays");
+for (var i = 0; i < 100; i++) clearing.Step(0.05);
+Check(clearing.Bpm == null, "tempo clears after silence");
 Check(beats.All(b => b is > 0 and <= 1), "beat strengths within 0–1");
 Check(new BeatDetector(rate).Process(new float[(int)(rate * 2)]).Count == 0, "silence produces no beats");
 var tone = Enumerable.Range(0, (int)(rate * 3)).Select(i => (float)(0.5 * Math.Sin(2 * Math.PI * 60 * i / rate))).ToArray();

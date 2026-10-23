@@ -17,13 +17,15 @@ Both apps share the same layout:
 
 - Two swatches: "screen average color → current lamp color". The lamp swatch only updates after the lamp acknowledges a write.
 - Scan for and pick a lamp, start/stop sync, and a log view. The last selected lamp is remembered.
+- **Capture area**: the whole main screen by default. Click 框選範圍… (Select area) and drag around the video (Esc cancels) so the lamp follows only that part of the screen, which helps when the video is not full screen. Click 整個螢幕 (Whole screen) to go back. The choice is remembered and can be changed while syncing.
+- **Auto-reconnect**: if the lamp drops the connection or a Bluetooth write fails while syncing, the app keeps the current light state and reconnects on its own for up to 30 seconds; it only stops (with the reason) if that fails. If it keeps failing, hold the lamp's back button to put it in pairing mode.
 - **Light effects** (adjustable live while syncing; settings are remembered):
   - **Vibrance** (0–100%, default 40%): averaged video colors tend to look grayish, so this boosts saturation while keeping hue and brightness. Colors that are already vivid, or close to gray/white, barely change.
   - **Minimum brightness** (0–50%, default off): in dark scenes the lamp stays at least this bright (same hue; pure black becomes a dim white), so it never goes fully dark.
   - **Fade time** (0–2 s, default 0.6 s): colors cross-fade smoothly. The value is roughly the time to complete 95% of a change; 0 switches instantly. Higher feels softer, lower follows cuts more tightly.
   - **Scene cuts** (on by default): when the screen color jumps a lot (such as an edit cut), the lamp catches up using about one fifth of the fade time; small changes still fade gently.
   - **Breathing** (off by default): while the screen color is steady, lamp brightness slowly rises and falls about every 4 seconds (down to ~70%). It steps aside as soon as the color changes, so it never fights the video.
-  - **Beat sync** (off by default): listens to the sound your computer is playing and detects kick-drum beats. While beats are found, the lamp rests slightly dimmer (~55%) and pops back to full brightness on each beat, and the window shows 偵測到節拍 (beat detected). About 2 seconds after the music stops, brightness returns to normal; breathing pauses while music plays. Audio is analyzed in memory only, never recorded or uploaded. The Mac app uses the same Screen & System Audio Recording permission; the Windows app needs no extra permission.
+  - **Beat sync** (off by default): listens to the sound your computer is playing and detects kick-drum beats. While beats are found, the lamp rests slightly dimmer (~55%) and pops back to full brightness on each beat, and the window shows the detected BPM. Light speed also follows the BPM: relative to 120 BPM, fast songs switch colors more crisply (down to ~0.6× the fade time) and slow songs more softly (up to ~1.4×), and each flash lasts about a third of a beat. About 2 seconds after the music stops, brightness returns to normal; breathing pauses while music plays. Audio is analyzed in memory only, never recorded or uploaded. The Mac app uses the same Screen & System Audio Recording permission; the Windows app needs no extra permission.
 
 ### macOS
 
@@ -44,8 +46,8 @@ Run `PenlightSync.exe`; it works the same way as the Mac app. The PC needs Bluet
 
 ### Tips
 
-- Play the video full screen, or at least make it fill most of the screen, so the average reflects the video. Black letterbox/pillarbox bars are skipped, white subtitles in the bottom quarter are ignored, and the center counts about twice as much as the corners; the desktop and other windows are still included.
-- The capture area is the whole **main display**, not a single browser tab.
+- Play the video full screen, or use 框選範圍… (Select area) to frame it, so the average reflects the video. Black letterbox/pillarbox bars are skipped, white subtitles in the bottom quarter are ignored, and the center counts about twice as much as the corners.
+- Sampling reads what is on the **main display**, not a single browser tab. A selected area is fixed to its place on the screen, so select it again after moving the video window.
 - The screen is sampled 5 times per second and light frames are sent at up to 20 per second. Only changed colors are sent; screen images are never stored or uploaded.
 
 ## Command-line tool (macOS)
@@ -66,7 +68,8 @@ The launcher only connects to the lamp listed in `device-id.txt`. CoreBluetooth 
 - macOS CLI and macOS app: a full-screen red → green → blue → white → black test got a write acknowledgement for every color, and the user confirmed the physical lamp changed in order. Scan, sync, and stop were tested on hardware. See `驗證紀錄.md` (Chinese).
 - Windows app: the protocol encoder, average color, and light-effect logic (including beat detection) pass the same test cases as the Swift code. **It has not yet been run on a real Windows PC**, and its system-audio capture is untested.
 - The v1.2.0 additions (vibrance, minimum brightness, bar/subtitle skipping, scene cuts, beat sync) have only passed automated tests and **have not been verified on a real lamp yet**.
-- Not yet verified: long video sessions and automatic reconnection (a disconnect currently stops sync with an error; click Start again). If a screen capture or a single write takes longer than 8 seconds, sync stops with an error.
+- The v1.3.0 additions (capture area selection, auto-reconnect, BPM-adaptive speed) have only passed automated tests and compilation and **have not been verified on a real lamp yet**.
+- Not yet verified: long video sessions. If a screen capture or a single write takes longer than 8 seconds, sync stops with an error.
 
 ## Building and tests
 

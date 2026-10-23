@@ -9,7 +9,7 @@ struct PenlightApp: App {
     var body: some Scene {
         Window("Ado 手燈連動", id: "main") {
             ContentView(controller: controller)
-                .frame(width: 420, height: 820)
+                .frame(width: 420, height: 860)
         }
         .windowResizability(.contentSize)
     }
@@ -69,6 +69,20 @@ struct ContentView: View {
             }
 
             GroupBox {
+                HStack {
+                    Text(regionDescription)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if controller.captureRegion != nil {
+                        Button("整個螢幕") { controller.useWholeScreen() }
+                    }
+                    Button("框選範圍…") { controller.selectRegion() }
+                }
+            } label: {
+                Text("取色範圍")
+            }
+
+            GroupBox {
                 VStack(alignment: .leading, spacing: 6) {
                     SliderRow(title: "鮮豔度", value: $controller.vibrance, range: 0...1, step: 0.05) {
                         String(format: "%.0f%%", $0 * 100)
@@ -82,10 +96,10 @@ struct ContentView: View {
                     Toggle("換場快切（畫面大幅換色時加快漸變）", isOn: $controller.sceneCuts)
                     Toggle("呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", isOn: $controller.breathing)
                     HStack {
-                        Toggle("跟音樂節拍閃動（聆聽系統播放的聲音）", isOn: $controller.beatSync)
+                        Toggle("跟音樂節拍閃動（依 BPM 調整快慢）", isOn: $controller.beatSync)
                         Spacer()
                         if controller.musicDetected {
-                            Label("偵測到節拍", systemImage: "music.note")
+                            Label(controller.bpm.map { "\($0) BPM" } ?? "偵測到節拍", systemImage: "music.note")
                                 .font(.caption)
                                 .foregroundStyle(.green)
                         }
@@ -137,17 +151,22 @@ struct ContentView: View {
                 .frame(minHeight: 48, maxHeight: .infinity)
             }
 
-            Text("取色範圍是整個主螢幕（略過黑邊與字幕）；只送出改變的顏色，畫面與聲音都不儲存或上傳。")
+            Text("取色時自動略過黑邊與字幕；只送出改變的顏色，畫面與聲音都不儲存或上傳。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(20)
     }
 
+    private var regionDescription: String {
+        guard let region = controller.captureRegion else { return "整個主螢幕" }
+        return String(format: "框選範圍（寬 %.0f%%、高 %.0f%%）", region.width * 100, region.height * 100)
+    }
+
     private var phaseColor: Color {
         switch controller.phase {
         case .syncing: return .green
-        case .connecting, .stopping: return .orange
+        case .connecting, .reconnecting, .stopping: return .orange
         case .idle: return controller.errorMessage == nil ? .secondary : .red
         }
     }

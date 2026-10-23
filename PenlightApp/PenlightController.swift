@@ -11,6 +11,7 @@ private let vibranceKey = "vibrance"
 private let minBrightnessKey = "minBrightness"
 private let sceneCutsKey = "sceneCuts"
 private let beatSyncKey = "beatSync"
+private let captureRegionKey = "captureRegion"
 
 struct DiscoveredLamp: Identifiable, Equatable {
     let id: UUID
@@ -19,12 +20,15 @@ struct DiscoveredLamp: Identifiable, Equatable {
 }
 
 /// GUI counterpart of the CLI's BLESession: same target checks, write-with-response and watchdogs,
-/// but long-lived, driven by buttons, and rendering a smoothed color stream through LightEngine.
+/// but long-lived, driven by buttons, rendering a smoothed color stream through LightEngine,
+/// and reconnecting on its own (for up to `reconnectWindow`) when the lamp drops the link.
 final class PenlightController: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     enum Phase: Equatable {
         case idle
         case connecting
         case syncing
+        /// The link dropped while syncing; a pending connect is waiting for the lamp to come back.
+        case reconnecting
         case stopping
     }
 
@@ -34,6 +38,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     static let operationTimeout: TimeInterval = 8
     static let connectTimeout: TimeInterval = 15
     static let scanDuration: TimeInterval = 10
+    static let reconnectWindow: TimeInterval = 30
 
     @Published private(set) var bluetoothReady = false
     @Published private(set) var isScanning = false
@@ -75,12 +80,23 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         didSet {
             engine.beatSync = beatSync
             UserDefaults.standard.set(beatSync, forKey: beatSyncKey)
-            guard phase == .syncing else { return }
+            guard phase == .syncing || phase == .reconnecting else { return }
             beatSync ? startAudio() : stopAudio()
+        }
+    }
+    /// Area of the main display to sample (normalized 0–1, top-left origin); nil samples the whole display.
+    /// Applies from the next sample, also while syncing.
+    @Published var captureRegion: CGRect? {
+        didSet {
+            let stored = captureRegion.map { [$0.minX, $0.minY, $0.width, $0.height].map(Double.init) }
+            UserDefaults.standard.set(stored, forKey: captureRegionKey)
+            if phase == .syncing { status = syncingStatus }
         }
     }
     /// True while beat sync hears music and is shaping the light.
     @Published private(set) var musicDetected = false
+    /// The music's tempo (rounded BPM) while beat sync is shaping the light.
+    @Published private(set) var bpm: Int?
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var screenColor: ScreenRGB?
     @Published private(set) var lampColor: ScreenRGB?
@@ -95,6 +111,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private var characteristic: CBCharacteristic?
     private var scanStopWork: DispatchWorkItem?
     private var connectTimeoutWork: DispatchWorkItem?
+    private var reconnectDeadlineWork: DispatchWorkItem?
     private var sampleTimer: Timer?
     private var renderTimer: Timer?
     private var engine: LightEngine
@@ -115,6 +132,9 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         minBrightness = defaults.object(forKey: minBrightnessKey) as? Double ?? 0
         sceneCuts = defaults.object(forKey: sceneCutsKey) as? Bool ?? true
         beatSync = defaults.bool(forKey: beatSyncKey)
+        if let stored = defaults.array(forKey: captureRegionKey) as? [Double], stored.count == 4 {
+            captureRegion = CGRect(x: stored[0], y: stored[1], width: stored[2], height: stored[3])
+        }
         engine = LightEngine(fadeTime: savedFade, breathing: false)
         super.init()
         engine = makeEngine()
@@ -198,7 +218,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     }
 
     func stop() {
-        guard phase == .connecting || phase == .syncing else { return }
+        guard phase == .connecting || phase == .syncing || phase == .reconnecting else { return }
         shutDown(reason: nil)
     }
 
@@ -248,7 +268,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        guard phase == .connecting, peripheral === self.peripheral else {
+        guard phase == .connecting || phase == .reconnecting, peripheral === self.peripheral else {
             central.cancelPeripheralConnection(peripheral)
             return
         }
@@ -263,23 +283,34 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard peripheral === self.peripheral else { return }
+        if phase == .reconnecting {
+            retryConnect()
+            return
+        }
         fail("無法連線：\(error?.localizedDescription ?? "未知錯誤")。")
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard peripheral === self.peripheral else { return }
-        if phase == .stopping {
+        switch phase {
+        case .stopping:
             finishStop()
-        } else if phase != .idle {
+        case .syncing:
             let detail = error.map { "（\($0.localizedDescription)）" } ?? ""
-            shutDown(reason: "手燈連線中斷\(detail)。請讓手燈重新進入配對模式後再按「開始連動」。")
+            reconnect(because: "手燈連線中斷\(detail)")
+        case .reconnecting:
+            retryConnect()
+        case .connecting:
+            shutDown(reason: "手燈連線中斷。請讓手燈重新進入配對模式後再按「開始連動」。")
+        case .idle:
+            break
         }
     }
 
     // MARK: - Peripheral
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard phase == .connecting else { return }
+        guard phase == .connecting || phase == .reconnecting else { return }
         if let error { fail("服務探索失敗：\(error.localizedDescription)"); return }
         guard let service = peripheral.services?.first(where: { $0.uuid == controlUUID }) else {
             fail("手燈沒有控制服務 0000。")
@@ -289,7 +320,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        guard phase == .connecting else { return }
+        guard phase == .connecting || phase == .reconnecting else { return }
         if let error { fail("特徵探索失敗：\(error.localizedDescription)"); return }
         guard let found = service.characteristics?.first(where: { $0.uuid == controlUUID }),
               found.properties.contains(.write) else {
@@ -298,8 +329,15 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         }
         connectTimeoutWork?.cancel()
         characteristic = found
+        let reconnected = phase == .reconnecting
+        reconnectDeadlineWork?.cancel()
+        reconnectDeadlineWork = nil
         phase = .syncing
-        status = "連動中：跟隨主螢幕平均色。"
+        status = syncingStatus
+        if reconnected {
+            log("已自動重新連線，繼續連動。")
+            return // Timers and audio kept running while the link was down.
+        }
         log("連動開始。")
         sampleTimer = Timer.scheduledTimer(withTimeInterval: Self.sampleInterval, repeats: true) { [weak self] _ in
             self?.tick()
@@ -316,7 +354,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         let color = pendingRGB
         pendingRGB = nil
         if let error {
-            if phase == .syncing { shutDown(reason: "藍牙寫入失敗：\(error.localizedDescription)") }
+            if phase == .syncing { reconnect(because: "藍牙寫入失敗（\(error.localizedDescription)）") }
             return
         }
         if let color { lampColor = color }
@@ -333,14 +371,15 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             return
         }
         if let started = writeStartedAt, now - started >= Self.operationTimeout {
-            shutDown(reason: "藍牙寫入超過 8 秒沒有回應，已停止連動。請確認手燈仍在附近。")
+            reconnect(because: "藍牙寫入超過 8 秒沒有回應")
             return
         }
         guard sampleStartedAt == nil else { return }
         sampleStartedAt = now
+        let region = captureRegion
         sampleTask = Task { @MainActor [weak self] in
             do {
-                let color = try await ScreenColorSampler().sample()
+                let color = try await ScreenColorSampler().sample(region: region)
                 self?.sampled(color)
             } catch {
                 self?.sampleFailed(error)
@@ -367,6 +406,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         lastRenderAt = now
         let frame = engine.step(dt: dt)
         if engine.musicDetected != musicDetected { musicDetected = engine.musicDetected }
+        let roundedBPM = engine.bpm.map { Int($0.rounded()) }
+        if roundedBPM != bpm { bpm = roundedBPM }
         guard let frame,
               writeStartedAt == nil,
               frame != lampColor,
@@ -418,6 +459,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         renderTimer = nil
         stopAudio()
         connectTimeoutWork?.cancel()
+        reconnectDeadlineWork?.cancel()
+        reconnectDeadlineWork = nil
         if writeStartedAt == nil, sampleStartedAt == nil {
             beginDisconnect()
         }
@@ -456,12 +499,61 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         }
     }
 
+    /// Shows the full-screen overlay to drag-select the sampling area; Esc keeps the current one.
+    func selectRegion() {
+        RegionSelector.select { [weak self] region in
+            guard let self, let region else { return }
+            self.captureRegion = region
+            self.log(String(format: "取色範圍改為框選區域（寬 %.0f%%、高 %.0f%%）。", region.width * 100, region.height * 100))
+        }
+    }
+
+    func useWholeScreen() {
+        guard captureRegion != nil else { return }
+        captureRegion = nil
+        log("取色範圍改回整個主螢幕。")
+    }
+
+    // MARK: - Reconnect
+
+    /// Keeps sampling and effect state, drops the link and waits (up to `reconnectWindow`) for the lamp
+    /// to accept a new connection. CoreBluetooth's connect request stays pending until the lamp is reachable.
+    private func reconnect(because reason: String) {
+        guard phase == .syncing, let peripheral else { return }
+        phase = .reconnecting
+        characteristic = nil
+        writeStartedAt = nil
+        pendingRGB = nil
+        lampColor = nil // Rewrite the current color as soon as the link is back.
+        status = "\(reason)，正在自動重新連線（最多 \(Int(Self.reconnectWindow)) 秒）…若一直連不上，請長按手燈背面按鈕進入配對模式。"
+        log("\(reason)，自動重新連線中。")
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self, self.phase == .reconnecting else { return }
+            self.shutDown(reason: "\(reason)，\(Int(Self.reconnectWindow)) 秒內無法重新連上手燈。請讓手燈重新進入配對模式後再按「開始連動」。")
+        }
+        reconnectDeadlineWork = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.reconnectWindow, execute: deadline)
+        if peripheral.state == .connected || peripheral.state == .connecting {
+            central.cancelPeripheralConnection(peripheral) // didDisconnect then issues the new connect.
+        } else {
+            retryConnect()
+        }
+    }
+
+    private func retryConnect() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.phase == .reconnecting, let peripheral = self.peripheral,
+                  peripheral.state == .disconnected else { return }
+            self.central.connect(peripheral, options: nil)
+        }
+    }
+
     // MARK: - Beat sync audio
 
     private func startAudio() {
         guard audioMonitor == nil else { return }
         let monitor = SystemAudioMonitor(
-            onBeat: { [weak self] strength in self?.engine.beat(strength: strength) },
+            onBeat: { [weak self] strength, bpm in self?.engine.beat(strength: strength, bpm: bpm) },
             onFailure: { [weak self] error in self?.audioFailed(error) }
         )
         audioMonitor = monitor
@@ -484,6 +576,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         audioMonitor?.stop()
         audioMonitor = nil
         musicDetected = false
+        bpm = nil
     }
 
     /// Beat sync is an extra; losing audio keeps the color sync running and reports why.
@@ -491,11 +584,16 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         guard audioMonitor != nil else { return }
         audioMonitor = nil
         musicDetected = false
+        bpm = nil
         errorMessage = "無法擷取系統音訊，節拍同步暫停（顏色連動照常）：\(error.localizedDescription)"
         log("節拍偵測失敗：\(error.localizedDescription)")
     }
 
     // MARK: - Helpers
+
+    private var syncingStatus: String {
+        captureRegion == nil ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。"
+    }
 
     private func makeEngine() -> LightEngine {
         var engine = LightEngine(fadeTime: fadeTime, breathing: breathing)

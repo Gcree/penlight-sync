@@ -29,8 +29,9 @@ public struct ScreenColorSampler {
         )
     }
 
+    /// Samples the main display, or only `region` when given (normalized 0–1, top-left origin).
     @available(macOS 14.0, *)
-    public func sample() async throws -> ScreenRGB {
+    public func sample(region: CGRect? = nil) async throws -> ScreenRGB {
         guard CGPreflightScreenCaptureAccess() else {
             throw ScreenColorError.screenCapturePermissionDenied
         }
@@ -50,6 +51,22 @@ public struct ScreenColorSampler {
         configuration.height = 54
         configuration.preservesAspectRatio = true
         configuration.scalesToFit = true
+        if let region = region?.intersection(CGRect(x: 0, y: 0, width: 1, height: 1)), !region.isEmpty {
+            let source = CGRect(
+                x: region.minX * CGFloat(display.width),
+                y: region.minY * CGFloat(display.height),
+                width: region.width * CGFloat(display.width),
+                height: region.height * CGFloat(display.height)
+            )
+            configuration.sourceRect = source
+            // Keep the 96×54 budget but match the region's shape so nothing is padded.
+            let aspect = source.width / max(source.height, 1)
+            if aspect >= 96.0 / 54.0 {
+                configuration.height = max(8, Int((96 / aspect).rounded()))
+            } else {
+                configuration.width = max(8, Int((54 * aspect).rounded()))
+            }
+        }
 
         // ScreenCaptureKit returns SDR screenshots as BGRA; Core Graphics normalizes them to RGBA here.
         let image = try await SCScreenshotManager.captureImage(

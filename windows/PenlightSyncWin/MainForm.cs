@@ -25,9 +25,12 @@ internal sealed class MainForm : Form
     private readonly Label _vibranceValue = TrackValue();
     private readonly Label _brightnessValue = TrackValue();
     private readonly Label _fadeValue = TrackValue();
+    private readonly Label _regionLabel = new() { AutoSize = false, Width = 200, Height = 28, TextAlign = ContentAlignment.MiddleLeft, ForeColor = SystemColors.GrayText };
+    private readonly Button _regionButton = new() { Text = "框選範圍…", AutoSize = true };
+    private readonly Button _wholeScreenButton = new() { Text = "整個螢幕", AutoSize = true };
     private readonly CheckBox _sceneCutsCheck = new() { Text = "換場快切（畫面大幅換色時加快漸變）", AutoSize = true };
     private readonly CheckBox _breathingCheck = new() { Text = "呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", AutoSize = true };
-    private readonly CheckBox _beatSyncCheck = new() { Text = "跟音樂節拍閃動（聆聽系統播放的聲音）", AutoSize = true };
+    private readonly CheckBox _beatSyncCheck = new() { Text = "跟音樂節拍閃動（依 BPM 調整快慢）", AutoSize = true };
     private readonly Label _musicLabel = new() { Text = "♪ 偵測到節拍", AutoSize = true, ForeColor = Color.SeaGreen, Margin = new Padding(6, 5, 0, 0) };
     private readonly Button _startButton = new() { Text = "▶ 開始連動", Height = 40, Dock = DockStyle.Top };
     private readonly Label _error = new() { AutoSize = true, MaximumSize = new Size(380, 0), ForeColor = Color.Firebrick };
@@ -41,7 +44,7 @@ internal sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 860);
+        ClientSize = new Size(420, 920);
         StartPosition = FormStartPosition.CenterScreen;
 
         _lampList.Columns.Add("手燈", 150);
@@ -66,6 +69,13 @@ internal sealed class MainForm : Form
         lampBox.Controls.Add(_lampList);
         lampBox.Controls.Add(scanRow);
 
+        var regionBox = new GroupBox { Text = "取色範圍", Dock = DockStyle.Top, Height = 64, Padding = new Padding(8, 4, 8, 4) };
+        var regionRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        regionRow.Controls.Add(_regionLabel);
+        regionRow.Controls.Add(_wholeScreenButton);
+        regionRow.Controls.Add(_regionButton);
+        regionBox.Controls.Add(regionRow);
+
         var effectsBox = new GroupBox { Text = "燈光效果", Dock = DockStyle.Top, Height = 230, Padding = new Padding(8) };
         var beatRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
         beatRow.Controls.Add(_beatSyncCheck);
@@ -84,7 +94,7 @@ internal sealed class MainForm : Form
         var logLabel = new Label { Text = "執行記錄", Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.BottomLeft, ForeColor = SystemColors.GrayText };
         var footer = new Label
         {
-            Text = "取色範圍是整個主螢幕（略過黑邊與字幕）；只送出改變的顏色，畫面與聲音都不儲存或上傳。",
+            Text = "取色時自動略過黑邊與字幕；只送出改變的顏色，畫面與聲音都不儲存或上傳。",
             Dock = DockStyle.Bottom, Height = 36, TextAlign = ContentAlignment.MiddleLeft, ForeColor = SystemColors.GrayText,
             Font = new Font(Font.FontFamily, 8.5f),
         };
@@ -97,6 +107,8 @@ internal sealed class MainForm : Form
         root.Controls.Add(_startButton);
         root.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 12 });
         root.Controls.Add(effectsBox);
+        root.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 8 });
+        root.Controls.Add(regionBox);
         root.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 8 });
         root.Controls.Add(lampBox);
         root.Controls.Add(statusRow);
@@ -136,6 +148,14 @@ internal sealed class MainForm : Form
             var available = Screen.FromControl(this).WorkingArea.Height;
             if (Height > available) Height = available;
         };
+        _regionButton.Click += (_, _) =>
+        {
+            var screen = Screen.PrimaryScreen?.Bounds ?? Rectangle.Empty;
+            if (screen.IsEmpty) return;
+            using var selector = new RegionSelectorForm(screen);
+            if (selector.ShowDialog(this) == DialogResult.OK && selector.Selection is { } selection) _controller.Region = selection;
+        };
+        _wholeScreenButton.Click += (_, _) => _controller.Region = null;
         _scanButton.Click += (_, _) =>
         {
             if (_controller.IsScanning) _controller.StopScan(); else _controller.StartScan();
@@ -164,10 +184,13 @@ internal sealed class MainForm : Form
         _brightnessValue.Text = _controller.MinBrightness == 0 ? "關" : $"{_controller.MinBrightness * 100:0}%";
         _fadeValue.Text = _controller.FadeTime == 0 ? "立即" : $"{_controller.FadeTime:0.0} 秒";
         _musicLabel.Visible = _controller.MusicDetected;
+        _musicLabel.Text = _controller.Bpm is { } bpm ? $"♪ {bpm} BPM" : "♪ 偵測到節拍";
+        _regionLabel.Text = _controller.Region is { } region ? $"框選範圍（寬 {region.Width * 100:0}%、高 {region.Height * 100:0}%）" : "整個主螢幕";
+        _wholeScreenButton.Visible = _controller.Region != null;
         _statusDot.BackColor = _controller.Phase switch
         {
             Phase.Syncing => Color.SeaGreen,
-            Phase.Connecting or Phase.Stopping => Color.Orange,
+            Phase.Connecting or Phase.Reconnecting or Phase.Stopping => Color.Orange,
             _ => _controller.ErrorMessage == null ? Color.Silver : Color.Firebrick,
         };
         _error.Text = _controller.ErrorMessage ?? "";

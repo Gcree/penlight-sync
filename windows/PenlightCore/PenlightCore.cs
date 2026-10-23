@@ -101,7 +101,8 @@ public static class AverageColor
 /// <summary>
 /// Port of LightEngine.swift: grades each sample (vibrance, brightness floor), fades toward it (faster after a
 /// scene cut), adds an optional breath while the color is steady, and optional beat sync that dims between
-/// beats and pops on each beat only while beats keep arriving.
+/// beats and pops on each beat only while beats keep arriving. With a known tempo, fades speed up for fast songs
+/// (and slow down for slow ones) and each flash lasts about a third of a beat.
 /// </summary>
 public sealed class LightEngine
 {
@@ -121,6 +122,10 @@ public sealed class LightEngine
     public const double BeatDecay = 0.18;
     public const double BeatHold = 2;
     public const double BeatRamp = 0.5;
+    /// <summary>Tempo at which the fade time is used as set; faster songs scale it down, slower ones up.</summary>
+    public const double ReferenceTempo = 120;
+    public const double MinTempoScale = 0.6;
+    public const double MaxTempoScale = 1.4;
 
     private double[]? _target;
     private double[] _current = new double[3];
@@ -130,6 +135,7 @@ public sealed class LightEngine
     private double _pulse;
     private double _beatActivity;
     private double _sinceBeat = double.PositiveInfinity;
+    private double? _tempo;
 
     public LightEngine(double fadeTime, bool breathing)
     {
@@ -150,6 +156,9 @@ public sealed class LightEngine
     /// <summary>True while beat sync is actively shaping the light.</summary>
     public bool MusicDetected => BeatSync && _beatActivity > 0.5;
 
+    /// <summary>The music's tempo while beat sync is active and a tempo is known.</summary>
+    public double? Bpm => MusicDetected ? _tempo : null;
+
     public void SetTarget(Rgb rgb)
     {
         var next = Grade(rgb, Vibrance, MinBrightness);
@@ -158,11 +167,12 @@ public sealed class LightEngine
         _target = next;
     }
 
-    /// <summary>Registers a detected beat with strength 0–1.</summary>
-    public void Beat(double strength)
+    /// <summary>Registers a detected beat with strength 0–1 and, when known, the music's tempo in BPM.</summary>
+    public void Beat(double strength, double? bpm = null)
     {
         _pulse = Math.Max(_pulse, Math.Clamp(strength, 0, 1));
         _sinceBeat = 0;
+        if (bpm is > 0) _tempo = bpm;
     }
 
     /// <summary>Advances the effect by <paramref name="dt"/> seconds. Returns null until the first sample arrives.</summary>
@@ -170,18 +180,23 @@ public sealed class LightEngine
     {
         if (_target == null) return null;
         dt = Math.Max(0, dt);
-        var activeFade = _cutInProgress ? Math.Max(MinimumCutFade, FadeTime * CutFadeFactor) : FadeTime;
+        // Blend the tempo's effect in and out with beat activity so it never jumps.
+        var tempoScale = _tempo is { } tempo ? 1 + (Math.Clamp(ReferenceTempo / tempo, MinTempoScale, MaxTempoScale) - 1) * _beatActivity : 1;
+        var baseFade = FadeTime * tempoScale;
+        var activeFade = _cutInProgress ? Math.Max(MinimumCutFade, baseFade * CutFadeFactor) : baseFade;
         var k = FadeTime <= 0 ? 1 : 1 - Math.Exp(-3 * dt / activeFade);
         for (var i = 0; i < 3; i++) _current[i] += (_target[i] - _current[i]) * k;
         var distance = Distance(_current, _target);
         if (distance < SteadyDistance) _cutInProgress = false;
 
         _sinceBeat += dt;
+        if (_sinceBeat >= BeatHold) _tempo = null;
         var beatsArriving = BeatSync && _sinceBeat < BeatHold ? 1.0 : 0.0;
         _beatActivity += (beatsArriving - _beatActivity) * (1 - Math.Exp(-dt / BeatRamp));
         // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
         var beatScale = 1 - BeatDepth * _beatActivity * (1 - _pulse);
-        _pulse *= Math.Exp(-dt / BeatDecay);
+        var decay = _tempo is { } beatTempo ? Math.Clamp(0.35 * 60 / beatTempo, 0.1, 0.3) : BeatDecay;
+        _pulse *= Math.Exp(-dt / decay);
 
         // Music takes over from breathing while it plays.
         var wanted = Breathing && distance < SteadyDistance ? 1 - _beatActivity : 0.0;
@@ -219,7 +234,10 @@ public sealed class LightEngine
         Math.Sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
 }
 
-/// <summary>Port of BeatDetector.swift: kick-drum energy onsets in ~23 ms windows of low-passed mono audio.</summary>
+/// <summary>
+/// Port of BeatDetector.swift: kick-drum energy onsets in ~23 ms windows of low-passed mono audio,
+/// plus a tempo estimate from the spacing of recent beats.
+/// </summary>
 public sealed class BeatDetector
 {
     public const double Cutoff = 150;
@@ -228,6 +246,9 @@ public sealed class BeatDetector
     public const double Threshold = 1.6;
     public const double MinimumEnergy = 1e-5;
     public const double Refractory = 0.2;
+    public const int TempoHistory = 8;
+    public const double MinTempo = 70;
+    public const double MaxTempo = 180;
 
     private readonly double _sampleRate;
     private readonly double _alpha;
@@ -237,6 +258,7 @@ public sealed class BeatDetector
     private int _count;
     private double? _average;
     private double _sinceBeat = double.PositiveInfinity;
+    private readonly List<double> _intervals = new();
 
     public BeatDetector(double sampleRate)
     {
@@ -244,6 +266,9 @@ public sealed class BeatDetector
         _alpha = 1 - Math.Exp(-2 * Math.PI * Cutoff / sampleRate);
         _windowSize = Math.Max(1, (int)(sampleRate * Window));
     }
+
+    /// <summary>Beats per minute from recent beats, or null until at least four steady intervals were heard.</summary>
+    public double? Bpm { get; private set; }
 
     /// <summary>Feeds mono samples; returns the strength (0–1) of each beat found in them.</summary>
     public List<double> Process(ReadOnlySpan<float> samples)
@@ -268,10 +293,33 @@ public sealed class BeatDetector
             if (ratio > Threshold && windowEnergy > MinimumEnergy && _sinceBeat >= Refractory)
             {
                 beats.Add(Math.Min(1, 0.4 + (ratio - Threshold) / 2.5));
+                RecordInterval(_sinceBeat);
                 _sinceBeat = 0;
             }
             _average = previous + (windowEnergy - previous) * (1 - Math.Exp(-windowDuration / AverageTime));
         }
         return beats;
+    }
+
+    /// <summary>Uses the median interval to reject odd gaps, then averages intervals close to it.</summary>
+    private void RecordInterval(double interval)
+    {
+        if (double.IsInfinity(interval)) return;
+        if (interval > 2) // A long pause: start over.
+        {
+            _intervals.Clear();
+            Bpm = null;
+            return;
+        }
+        _intervals.Add(interval);
+        if (_intervals.Count > TempoHistory) _intervals.RemoveRange(0, _intervals.Count - TempoHistory);
+        if (_intervals.Count < 4) return;
+        var median = _intervals.Order().ElementAt(_intervals.Count / 2);
+        var steady = _intervals.Where(i => Math.Abs(i - median) <= median * 0.15).ToList();
+        if (steady.Count < 3) return;
+        var tempo = 60 / steady.Average();
+        while (tempo < MinTempo) tempo *= 2;
+        while (tempo > MaxTempo) tempo /= 2;
+        Bpm = tempo;
     }
 }

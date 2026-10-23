@@ -107,6 +107,36 @@ struct LightEngineTest {
         for _ in 0..<100 { _ = music.step(dt: 0.05) } // 5 s of silence
         expect(!music.musicDetected && music.step(dt: 0.05)! == white, "Silence must release beat sync to full brightness.")
 
+        // Tempo: fast songs fade quicker than slow ones; the tempo is reported only while beats arrive.
+        func fadeProgress(bpm: Double) -> Int {
+            var engine = LightEngine(fadeTime: 0.6, breathing: false)
+            engine.sceneCuts = false
+            engine.beatSync = true
+            engine.setTarget(ScreenRGB(red: 255, green: 0, blue: 0))
+            for index in 0..<40 { // 2 s of beats so beat sync is fully engaged
+                if index % 5 == 0 { engine.beat(strength: 1, bpm: bpm) }
+                _ = engine.step(dt: 0.05)
+            }
+            expect(engine.bpm == bpm, "The engine must report the tempo while beats arrive: \(String(describing: engine.bpm))")
+            engine.setTarget(ScreenRGB(red: 0, green: 0, blue: 255))
+            engine.beat(strength: 1, bpm: bpm)
+            var frame = engine.step(dt: 0.05)!
+            for _ in 0..<3 { frame = engine.step(dt: 0.05)! }
+            return Int(frame.blue)
+        }
+        let fast = fadeProgress(bpm: 170), slow = fadeProgress(bpm: 75)
+        expect(fast > slow + 20, "A fast song must fade quicker than a slow one: fast \(fast), slow \(slow)")
+        var tempoEngine = LightEngine(fadeTime: 0.6, breathing: false)
+        tempoEngine.beatSync = true
+        tempoEngine.setTarget(white)
+        for index in 0..<40 {
+            if index % 10 == 0 { tempoEngine.beat(strength: 1, bpm: 120) }
+            _ = tempoEngine.step(dt: 0.05)
+        }
+        expect(tempoEngine.bpm == 120, "Tempo must be reported while music plays.")
+        for _ in 0..<100 { _ = tempoEngine.step(dt: 0.05) }
+        expect(tempoEngine.bpm == nil, "Tempo must clear after silence.")
+
         // Beat detector: finds 120 BPM kicks, ignores silence and a steady tone.
         let rate = 48_000.0
         var detector = BeatDetector(sampleRate: rate)
@@ -119,6 +149,19 @@ struct LightEngineTest {
         }
         let beats = detector.process(kicks)
         expect((6...9).contains(beats.count), "Expected ~8 kicks in 4 s at 120 BPM, got \(beats.count)")
+        expect(detector.bpm.map { abs($0 - 120) <= 4 } ?? false, "Expected ~120 BPM, got \(String(describing: detector.bpm))")
+        for (tempo, label) in [(150.0, "150"), (90.0, "90")] {
+            var tempoDetector = BeatDetector(sampleRate: rate)
+            let period = 60 / tempo
+            let samples = (0..<Int(rate * 6)).map { index -> Float in
+                let t = Double(index) / rate
+                let inKick = t.truncatingRemainder(dividingBy: period) < 0.08
+                return (inKick ? Float(0.8 * sin(2 * Double.pi * 60 * t)) : 0) + Float.random(in: -0.002...0.002)
+            }
+            _ = tempoDetector.process(samples)
+            expect(tempoDetector.bpm.map { abs($0 - tempo) <= 5 } ?? false,
+                   "Expected ~\(label) BPM, got \(String(describing: tempoDetector.bpm))")
+        }
         expect(beats.allSatisfy { $0 > 0 && $0 <= 1 }, "Beat strengths must be within 0–1.")
         var quiet = BeatDetector(sampleRate: rate)
         expect(quiet.process([Float](repeating: 0, count: Int(rate * 2))).isEmpty, "Silence must not produce beats.")

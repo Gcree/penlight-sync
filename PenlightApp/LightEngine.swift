@@ -5,7 +5,9 @@ import Foundation
 /// - output fades exponentially toward the graded sample, faster right after a scene cut;
 /// - an optional slow brightness "breath" appears only while the color is steady;
 /// - optional beat sync dims the lamp slightly between beats and pops it back up on each beat,
-///   but only while beats keep arriving, so silence leaves the lamp at full brightness.
+///   but only while beats keep arriving, so silence leaves the lamp at full brightness;
+///   with a known tempo, fades speed up for fast songs (and slow down for slow ones) and each flash
+///   lasts about a third of a beat.
 struct LightEngine {
     static let breathPeriod: TimeInterval = 4
     /// Brightness dips to 70% at the bottom of each breath.
@@ -25,6 +27,9 @@ struct LightEngine {
     /// Beat sync engages while beats arrived within this window and releases after it.
     static let beatHold: TimeInterval = 2
     static let beatRamp: TimeInterval = 0.5
+    /// Tempo at which the fade time is used as set; faster songs scale it down, slower ones up, within `tempoScaleRange`.
+    static let referenceTempo = 120.0
+    static let tempoScaleRange = 0.6...1.4
 
     /// Time to cover ~95% of the way to a new color; 0 switches instantly.
     var fadeTime: TimeInterval
@@ -44,6 +49,7 @@ struct LightEngine {
     private var pulse = 0.0
     private var beatActivity = 0.0
     private var sinceBeat = TimeInterval.infinity
+    private var tempo: Double?
 
     init(fadeTime: TimeInterval, breathing: Bool) {
         self.fadeTime = fadeTime
@@ -52,6 +58,9 @@ struct LightEngine {
 
     /// True while beat sync is actively shaping the light.
     var musicDetected: Bool { beatSync && beatActivity > 0.5 }
+
+    /// The music's tempo while beat sync is active and a tempo is known.
+    var bpm: Double? { musicDetected ? tempo : nil }
 
     mutating func setTarget(_ rgb: ScreenRGB) {
         let next = Self.grade(rgb, vibrance: vibrance, minBrightness: minBrightness)
@@ -63,17 +72,21 @@ struct LightEngine {
         target = next
     }
 
-    /// Registers a detected beat with strength 0–1.
-    mutating func beat(strength: Double) {
+    /// Registers a detected beat with strength 0–1 and, when known, the music's tempo in BPM.
+    mutating func beat(strength: Double, bpm: Double? = nil) {
         pulse = max(pulse, min(1, max(0, strength)))
         sinceBeat = 0
+        if let bpm, bpm > 0 { tempo = bpm }
     }
 
     /// Advances the effect by `dt` seconds. Returns nil until the first sample arrives.
     mutating func step(dt: TimeInterval) -> ScreenRGB? {
         guard let target else { return nil }
         let dt = max(0, dt)
-        let activeFade = cutInProgress ? max(Self.minimumCutFade, fadeTime * Self.cutFadeFactor) : fadeTime
+        // Blend the tempo's effect in and out with beat activity so it never jumps.
+        let tempoScale = tempo.map { 1 + (min(Self.tempoScaleRange.upperBound, max(Self.tempoScaleRange.lowerBound, Self.referenceTempo / $0)) - 1) * beatActivity } ?? 1
+        let baseFade = fadeTime * tempoScale
+        let activeFade = cutInProgress ? max(Self.minimumCutFade, baseFade * Self.cutFadeFactor) : baseFade
         if fadeTime <= 0 {
             current = target
         } else {
@@ -84,11 +97,13 @@ struct LightEngine {
         if distance < Self.steadyDistance { cutInProgress = false }
 
         sinceBeat += dt
+        if sinceBeat >= Self.beatHold { tempo = nil }
         let beatsArriving = beatSync && sinceBeat < Self.beatHold ? 1.0 : 0.0
         beatActivity += (beatsArriving - beatActivity) * (1 - exp(-dt / Self.beatRamp))
         // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
         let beatScale = 1 - Self.beatDepth * beatActivity * (1 - pulse)
-        pulse *= exp(-dt / Self.beatDecay)
+        let decay = tempo.map { min(0.3, max(0.1, 0.35 * 60 / $0)) } ?? Self.beatDecay
+        pulse *= exp(-dt / decay)
 
         // Music takes over from breathing while it plays.
         let wanted = breathing && distance < Self.steadyDistance ? 1 - beatActivity : 0.0
