@@ -41,8 +41,12 @@ public static class PenlightProtocol
 /// <summary>Port of ScreenColorSampler.averageColor in ScreenColor.swift.</summary>
 public static class AverageColor
 {
-    /// Average of 8-bit premultiplied RGBA (or BGRA when <paramref name="bgra"/> is true) rows.
-    /// Transparent pixels are skipped. Returns null for malformed or fully transparent buffers.
+    /// <summary>
+    /// Video-oriented average of 8-bit premultiplied RGBA (or BGRA when <paramref name="bgra"/> is true) rows.
+    /// Trims near-black letterbox/pillarbox edges, skips near-white pixels in the bottom quarter (subtitles),
+    /// and weights the center up to twice the corners. Entirely black/white frames fall back to the plain average.
+    /// Returns null for malformed or fully transparent buffers.
+    /// </summary>
     public static Rgb? Find(byte[] pixels, int width, int height, int bytesPerRow, bool bgra = false)
     {
         if (width <= 0 || height <= 0 || width > int.MaxValue / 4) return null;
@@ -52,32 +56,52 @@ public static class AverageColor
         if (pixels.Length < requiredBytes) return null;
 
         int redOffset = bgra ? 2 : 0, blueOffset = bgra ? 0 : 2;
-        long redSum = 0, greenSum = 0, blueSum = 0, count = 0;
-        for (var y = 0; y < height; y++)
+        (int R, int G, int B)? Pixel(int x, int y)
         {
-            var row = y * bytesPerRow;
-            for (var x = 0; x < width; x++)
+            var offset = y * bytesPerRow + x * 4;
+            int alpha = pixels[offset + 3];
+            if (alpha == 0) return null;
+            return (Math.Min(255, pixels[offset + redOffset] * 255 / alpha),
+                    Math.Min(255, pixels[offset + 1] * 255 / alpha),
+                    Math.Min(255, pixels[offset + blueOffset] * 255 / alpha));
+        }
+        bool IsBar((int R, int G, int B)? p) => p is not { } v || Math.Max(v.R, Math.Max(v.G, v.B)) < 16;
+
+        // Trim letterbox rows and pillarbox columns while they are entirely near-black.
+        int top = 0, bottom = height - 1, left = 0, right = width - 1;
+        bool RowIsBar(int y) { for (var x = left; x <= right; x++) if (!IsBar(Pixel(x, y))) return false; return true; }
+        bool ColumnIsBar(int x) { for (var y = top; y <= bottom; y++) if (!IsBar(Pixel(x, y))) return false; return true; }
+        while (top < bottom && RowIsBar(top)) top++;
+        while (bottom > top && RowIsBar(bottom)) bottom--;
+        while (left < right && ColumnIsBar(left)) left++;
+        while (right > left && ColumnIsBar(right)) right--;
+
+        var subtitleTop = bottom - (bottom - top + 1) / 4 + 1;
+        double cr = 0, cg = 0, cb = 0, cw = 0, ar = 0, ag = 0, ab = 0, aw = 0;
+        for (var y = top; y <= bottom; y++)
+        {
+            for (var x = left; x <= right; x++)
             {
-                var offset = row + x * 4;
-                int alpha = pixels[offset + 3];
-                if (alpha == 0) continue;
-                redSum += Math.Min(255, pixels[offset + redOffset] * 255 / alpha);
-                greenSum += Math.Min(255, pixels[offset + 1] * 255 / alpha);
-                blueSum += Math.Min(255, pixels[offset + blueOffset] * 255 / alpha);
-                count++;
+                if (Pixel(x, y) is not { } p) continue;
+                var nx = (x - left + 0.5) / (right - left + 1) * 2 - 1;
+                var ny = (y - top + 0.5) / (bottom - top + 1) * 2 - 1;
+                var weight = 2 - Math.Min(1, Math.Sqrt(nx * nx + ny * ny) / Math.Sqrt(2));
+                ar += p.R * weight; ag += p.G * weight; ab += p.B * weight; aw += weight;
+                if (y >= subtitleTop && Math.Min(p.R, Math.Min(p.G, p.B)) > 200) continue;
+                cr += p.R * weight; cg += p.G * weight; cb += p.B * weight; cw += weight;
             }
         }
-        if (count == 0) return null;
-        return new Rgb(
-            (byte)((redSum + count / 2) / count),
-            (byte)((greenSum + count / 2) / count),
-            (byte)((blueSum + count / 2) / count));
+        if (cw <= 0) (cr, cg, cb, cw) = (ar, ag, ab, aw);
+        if (cw <= 0) return null;
+        byte Channel(double sum) => (byte)Math.Round(sum / cw, MidpointRounding.AwayFromZero);
+        return new Rgb(Channel(cr), Channel(cg), Channel(cb));
     }
 }
 
 /// <summary>
-/// Port of LightEngine.swift: an exponential fade toward the latest screen sample, plus an optional slow
-/// brightness "breath" that only appears while the color is steady, so it never fights the video's own changes.
+/// Port of LightEngine.swift: grades each sample (vibrance, brightness floor), fades toward it (faster after a
+/// scene cut), adds an optional breath while the color is steady, and optional beat sync that dims between
+/// beats and pops on each beat only while beats keep arriving.
 /// </summary>
 public sealed class LightEngine
 {
@@ -88,11 +112,24 @@ public sealed class LightEngine
     public const double SteadyDistance = 24;
     /// <summary>How quickly breathing fades in or out after the color settles or changes.</summary>
     public const double BreathRamp = 0.8;
+    /// <summary>RGB distance of a sample jump that counts as a scene cut.</summary>
+    public const double CutDistance = 140;
+    public const double CutFadeFactor = 0.2;
+    public const double MinimumCutFade = 0.08;
+    /// <summary>Between beats the lamp rests at 55% brightness; each beat lifts it back to full.</summary>
+    public const double BeatDepth = 0.45;
+    public const double BeatDecay = 0.18;
+    public const double BeatHold = 2;
+    public const double BeatRamp = 0.5;
 
     private double[]? _target;
-    private readonly double[] _current = new double[3];
+    private double[] _current = new double[3];
+    private bool _cutInProgress;
     private double _breathLevel;
     private double _phase;
+    private double _pulse;
+    private double _beatActivity;
+    private double _sinceBeat = double.PositiveInfinity;
 
     public LightEngine(double fadeTime, bool breathing)
     {
@@ -103,12 +140,29 @@ public sealed class LightEngine
     /// <summary>Seconds to cover ~95% of the way to a new color; 0 switches instantly.</summary>
     public double FadeTime { get; set; }
     public bool Breathing { get; set; }
+    /// <summary>0 leaves colors as sampled; 1 strongly boosts saturation (hue is preserved).</summary>
+    public double Vibrance { get; set; }
+    /// <summary>Lowest brightness (0–1) the lamp shows; 0 lets dark scenes go fully dark.</summary>
+    public double MinBrightness { get; set; }
+    public bool SceneCuts { get; set; } = true;
+    public bool BeatSync { get; set; }
+
+    /// <summary>True while beat sync is actively shaping the light.</summary>
+    public bool MusicDetected => BeatSync && _beatActivity > 0.5;
 
     public void SetTarget(Rgb rgb)
     {
-        double[] next = { rgb.Red, rgb.Green, rgb.Blue };
-        if (_target == null) next.CopyTo(_current, 0); // The first sample shows immediately instead of fading in from black.
+        var next = Grade(rgb, Vibrance, MinBrightness);
+        if (_target == null) _current = (double[])next.Clone(); // The first sample shows immediately instead of fading in from black.
+        else if (SceneCuts && Distance(next, _current) > CutDistance) _cutInProgress = true;
         _target = next;
+    }
+
+    /// <summary>Registers a detected beat with strength 0–1.</summary>
+    public void Beat(double strength)
+    {
+        _pulse = Math.Max(_pulse, Math.Clamp(strength, 0, 1));
+        _sinceBeat = 0;
     }
 
     /// <summary>Advances the effect by <paramref name="dt"/> seconds. Returns null until the first sample arrives.</summary>
@@ -116,20 +170,108 @@ public sealed class LightEngine
     {
         if (_target == null) return null;
         dt = Math.Max(0, dt);
-        var k = FadeTime <= 0 ? 1 : 1 - Math.Exp(-3 * dt / FadeTime);
-        double distanceSquared = 0;
-        for (var i = 0; i < 3; i++)
-        {
-            _current[i] += (_target[i] - _current[i]) * k;
-            distanceSquared += (_target[i] - _current[i]) * (_target[i] - _current[i]);
-        }
+        var activeFade = _cutInProgress ? Math.Max(MinimumCutFade, FadeTime * CutFadeFactor) : FadeTime;
+        var k = FadeTime <= 0 ? 1 : 1 - Math.Exp(-3 * dt / activeFade);
+        for (var i = 0; i < 3; i++) _current[i] += (_target[i] - _current[i]) * k;
+        var distance = Distance(_current, _target);
+        if (distance < SteadyDistance) _cutInProgress = false;
 
-        var wanted = Breathing && Math.Sqrt(distanceSquared) < SteadyDistance ? 1.0 : 0.0;
+        _sinceBeat += dt;
+        var beatsArriving = BeatSync && _sinceBeat < BeatHold ? 1.0 : 0.0;
+        _beatActivity += (beatsArriving - _beatActivity) * (1 - Math.Exp(-dt / BeatRamp));
+        // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
+        var beatScale = 1 - BeatDepth * _beatActivity * (1 - _pulse);
+        _pulse *= Math.Exp(-dt / BeatDecay);
+
+        // Music takes over from breathing while it plays.
+        var wanted = Breathing && distance < SteadyDistance ? 1 - _beatActivity : 0.0;
         _breathLevel += (wanted - _breathLevel) * (1 - Math.Exp(-dt / BreathRamp));
         _phase = (_phase + dt / BreathPeriod) % 1;
-        var scale = 1 - BreathDepth * _breathLevel * (0.5 - 0.5 * Math.Cos(2 * Math.PI * _phase));
+        var breathScale = 1 - BreathDepth * _breathLevel * (0.5 - 0.5 * Math.Cos(2 * Math.PI * _phase));
 
+        var scale = beatScale * breathScale;
         byte Channel(int i) => (byte)Math.Clamp(Math.Round(_current[i] * scale, MidpointRounding.AwayFromZero), 0, 255);
         return new Rgb(Channel(0), Channel(1), Channel(2));
+    }
+
+    /// <summary>
+    /// Boosts saturation along a curve that lifts dull colors most, keeps hue and brightness,
+    /// then raises brightness to at least <paramref name="minBrightness"/>.
+    /// </summary>
+    public static double[] Grade(Rgb rgb, double vibrance, double minBrightness)
+    {
+        double[] channels = { rgb.Red, rgb.Green, rgb.Blue };
+        var maximum = channels.Max();
+        var minimum = channels.Min();
+        if (maximum > 0 && maximum > minimum && vibrance > 0)
+        {
+            var saturation = (maximum - minimum) / maximum;
+            var boosted = 1 - Math.Pow(1 - saturation, 1 + 3 * Math.Min(1, vibrance));
+            channels = channels.Select(c => maximum - (maximum - c) * boosted / saturation).ToArray();
+        }
+        var floor = 255 * Math.Clamp(minBrightness, 0, 1);
+        if (maximum < floor)
+            channels = maximum > 0 ? channels.Select(c => c * floor / maximum).ToArray() : new[] { floor, floor, floor };
+        return channels;
+    }
+
+    private static double Distance(double[] a, double[] b) =>
+        Math.Sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+}
+
+/// <summary>Port of BeatDetector.swift: kick-drum energy onsets in ~23 ms windows of low-passed mono audio.</summary>
+public sealed class BeatDetector
+{
+    public const double Cutoff = 150;
+    public const double Window = 0.023;
+    public const double AverageTime = 1.2;
+    public const double Threshold = 1.6;
+    public const double MinimumEnergy = 1e-5;
+    public const double Refractory = 0.2;
+
+    private readonly double _sampleRate;
+    private readonly double _alpha;
+    private readonly int _windowSize;
+    private double _lowPass;
+    private double _energy;
+    private int _count;
+    private double? _average;
+    private double _sinceBeat = double.PositiveInfinity;
+
+    public BeatDetector(double sampleRate)
+    {
+        _sampleRate = sampleRate;
+        _alpha = 1 - Math.Exp(-2 * Math.PI * Cutoff / sampleRate);
+        _windowSize = Math.Max(1, (int)(sampleRate * Window));
+    }
+
+    /// <summary>Feeds mono samples; returns the strength (0–1) of each beat found in them.</summary>
+    public List<double> Process(ReadOnlySpan<float> samples)
+    {
+        var beats = new List<double>();
+        var windowDuration = _windowSize / _sampleRate;
+        foreach (var sample in samples)
+        {
+            _lowPass += (sample - _lowPass) * _alpha;
+            _energy += _lowPass * _lowPass;
+            if (++_count != _windowSize) continue;
+            var windowEnergy = _energy / _count;
+            _energy = 0;
+            _count = 0;
+            _sinceBeat += windowDuration;
+            if (_average is not { } previous)
+            {
+                _average = windowEnergy;
+                continue;
+            }
+            var ratio = windowEnergy / Math.Max(previous, 1e-12);
+            if (ratio > Threshold && windowEnergy > MinimumEnergy && _sinceBeat >= Refractory)
+            {
+                beats.Add(Math.Min(1, 0.4 + (ratio - Threshold) / 2.5));
+                _sinceBeat = 0;
+            }
+            _average = previous + (windowEnergy - previous) * (1 - Math.Exp(-windowDuration / AverageTime));
+        }
+        return beats;
     }
 }

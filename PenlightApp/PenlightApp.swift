@@ -9,7 +9,7 @@ struct PenlightApp: App {
     var body: some Scene {
         Window("Ado 手燈連動", id: "main") {
             ContentView(controller: controller)
-                .frame(width: 420, height: 720)
+                .frame(width: 420, height: 820)
         }
         .windowResizability(.contentSize)
     }
@@ -69,15 +69,27 @@ struct ContentView: View {
             }
 
             GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("漸變時間")
-                        Slider(value: $controller.fadeTime, in: 0...2, step: 0.1)
-                        Text(controller.fadeTime == 0 ? "立即" : String(format: "%.1f 秒", controller.fadeTime))
-                            .monospacedDigit()
-                            .frame(width: 48, alignment: .trailing)
+                VStack(alignment: .leading, spacing: 6) {
+                    SliderRow(title: "鮮豔度", value: $controller.vibrance, range: 0...1, step: 0.05) {
+                        String(format: "%.0f%%", $0 * 100)
                     }
+                    SliderRow(title: "最低亮度", value: $controller.minBrightness, range: 0...0.5, step: 0.05) {
+                        $0 == 0 ? "關" : String(format: "%.0f%%", $0 * 100)
+                    }
+                    SliderRow(title: "漸變時間", value: $controller.fadeTime, range: 0...2, step: 0.1) {
+                        $0 == 0 ? "立即" : String(format: "%.1f 秒", $0)
+                    }
+                    Toggle("換場快切（畫面大幅換色時加快漸變）", isOn: $controller.sceneCuts)
                     Toggle("呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", isOn: $controller.breathing)
+                    HStack {
+                        Toggle("跟音樂節拍閃動（聆聽系統播放的聲音）", isOn: $controller.beatSync)
+                        Spacer()
+                        if controller.musicDetected {
+                            Label("偵測到節拍", systemImage: "music.note")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                        }
+                    }
                 }
             } label: {
                 Text("燈光效果")
@@ -125,7 +137,7 @@ struct ContentView: View {
                 .frame(minHeight: 48, maxHeight: .infinity)
             }
 
-            Text("取色範圍是整個主螢幕；只送出改變的顏色，不儲存或上傳畫面。")
+            Text("取色範圍是整個主螢幕（略過黑邊與字幕）；只送出改變的顏色，畫面與聲音都不儲存或上傳。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -156,6 +168,24 @@ private struct Swatch: View {
             Text(color?.description ?? "—")
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct SliderRow: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let format: (Double) -> String
+
+    var body: some View {
+        HStack {
+            Text(title).frame(width: 60, alignment: .leading)
+            Slider(value: $value, in: range, step: step)
+            Text(format(value))
+                .monospacedDigit()
+                .frame(width: 48, alignment: .trailing)
         }
     }
 }

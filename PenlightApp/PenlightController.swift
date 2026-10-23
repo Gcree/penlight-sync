@@ -7,6 +7,10 @@ private let controlUUID = CBUUID(string: "0000")
 private let selectedLampKey = "selectedLampID"
 private let fadeTimeKey = "fadeTime"
 private let breathingKey = "breathing"
+private let vibranceKey = "vibrance"
+private let minBrightnessKey = "minBrightness"
+private let sceneCutsKey = "sceneCuts"
+private let beatSyncKey = "beatSync"
 
 struct DiscoveredLamp: Identifiable, Equatable {
     let id: UUID
@@ -49,6 +53,34 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             UserDefaults.standard.set(breathing, forKey: breathingKey)
         }
     }
+    @Published var vibrance: Double {
+        didSet {
+            engine.vibrance = vibrance
+            UserDefaults.standard.set(vibrance, forKey: vibranceKey)
+        }
+    }
+    @Published var minBrightness: Double {
+        didSet {
+            engine.minBrightness = minBrightness
+            UserDefaults.standard.set(minBrightness, forKey: minBrightnessKey)
+        }
+    }
+    @Published var sceneCuts: Bool {
+        didSet {
+            engine.sceneCuts = sceneCuts
+            UserDefaults.standard.set(sceneCuts, forKey: sceneCutsKey)
+        }
+    }
+    @Published var beatSync: Bool {
+        didSet {
+            engine.beatSync = beatSync
+            UserDefaults.standard.set(beatSync, forKey: beatSyncKey)
+            guard phase == .syncing else { return }
+            beatSync ? startAudio() : stopAudio()
+        }
+    }
+    /// True while beat sync hears music and is shaping the light.
+    @Published private(set) var musicDetected = false
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var screenColor: ScreenRGB?
     @Published private(set) var lampColor: ScreenRGB?
@@ -72,15 +104,20 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private var writeStartedAt: TimeInterval?
     private var pendingRGB: ScreenRGB?
     private var stopReason: String?
+    private var audioMonitor: SystemAudioMonitor?
 
     override init() {
         let defaults = UserDefaults.standard
         let savedFade = defaults.object(forKey: fadeTimeKey) as? Double ?? 0.6
-        let savedBreathing = defaults.bool(forKey: breathingKey)
         fadeTime = savedFade
-        breathing = savedBreathing
-        engine = LightEngine(fadeTime: savedFade, breathing: savedBreathing)
+        breathing = defaults.bool(forKey: breathingKey)
+        vibrance = defaults.object(forKey: vibranceKey) as? Double ?? 0.4
+        minBrightness = defaults.object(forKey: minBrightnessKey) as? Double ?? 0
+        sceneCuts = defaults.object(forKey: sceneCutsKey) as? Bool ?? true
+        beatSync = defaults.bool(forKey: beatSyncKey)
+        engine = LightEngine(fadeTime: savedFade, breathing: false)
         super.init()
+        engine = makeEngine()
         if let saved = UserDefaults.standard.string(forKey: selectedLampKey) {
             selectedLampID = UUID(uuidString: saved)
         }
@@ -144,7 +181,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         stopReason = nil
         screenColor = nil
         lampColor = nil
-        engine = LightEngine(fadeTime: fadeTime, breathing: breathing)
+        engine = makeEngine()
         lastRenderAt = nil
         phase = .connecting
         status = "連線中…"
@@ -270,6 +307,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         renderTimer = Timer.scheduledTimer(withTimeInterval: Self.renderInterval, repeats: true) { [weak self] _ in
             self?.render()
         }
+        if beatSync { startAudio() }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -327,7 +365,9 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         let now = ProcessInfo.processInfo.systemUptime
         let dt = lastRenderAt.map { now - $0 } ?? 0
         lastRenderAt = now
-        guard let frame = engine.step(dt: dt),
+        let frame = engine.step(dt: dt)
+        if engine.musicDetected != musicDetected { musicDetected = engine.musicDetected }
+        guard let frame,
               writeStartedAt == nil,
               frame != lampColor,
               let peripheral,
@@ -376,6 +416,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         sampleTimer = nil
         renderTimer?.invalidate()
         renderTimer = nil
+        stopAudio()
         connectTimeoutWork?.cancel()
         if writeStartedAt == nil, sampleStartedAt == nil {
             beginDisconnect()
@@ -415,7 +456,55 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         }
     }
 
+    // MARK: - Beat sync audio
+
+    private func startAudio() {
+        guard audioMonitor == nil else { return }
+        let monitor = SystemAudioMonitor(
+            onBeat: { [weak self] strength in self?.engine.beat(strength: strength) },
+            onFailure: { [weak self] error in self?.audioFailed(error) }
+        )
+        audioMonitor = monitor
+        Task { @MainActor [weak self] in
+            do {
+                try await monitor.start()
+                guard let self, self.audioMonitor === monitor else {
+                    monitor.stop() // Stopped or replaced while starting.
+                    return
+                }
+                self.log("節拍偵測：開始聆聽系統音訊。")
+            } catch {
+                guard let self, self.audioMonitor === monitor else { return }
+                self.audioFailed(error)
+            }
+        }
+    }
+
+    private func stopAudio() {
+        audioMonitor?.stop()
+        audioMonitor = nil
+        musicDetected = false
+    }
+
+    /// Beat sync is an extra; losing audio keeps the color sync running and reports why.
+    private func audioFailed(_ error: Error) {
+        guard audioMonitor != nil else { return }
+        audioMonitor = nil
+        musicDetected = false
+        errorMessage = "無法擷取系統音訊，節拍同步暫停（顏色連動照常）：\(error.localizedDescription)"
+        log("節拍偵測失敗：\(error.localizedDescription)")
+    }
+
     // MARK: - Helpers
+
+    private func makeEngine() -> LightEngine {
+        var engine = LightEngine(fadeTime: fadeTime, breathing: breathing)
+        engine.vibrance = vibrance
+        engine.minBrightness = minBrightness
+        engine.sceneCuts = sceneCuts
+        engine.beatSync = beatSync
+        return engine
+    }
 
     private func restoreRememberedLamp() {
         guard let id = selectedLampID, !lamps.contains(where: { $0.id == id }),

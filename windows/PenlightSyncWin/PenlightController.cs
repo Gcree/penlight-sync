@@ -22,7 +22,7 @@ internal sealed class LampInfo
 
 /// <summary>
 /// Windows counterpart of the macOS PenlightController: same target-name check, write-with-response,
-/// LightEngine fade/breath rendering (only changed colors are written) and 8-second watchdogs.
+/// LightEngine effects rendering (only changed colors are written), optional beat sync and 8-second watchdogs.
 /// All public state is read and changed on the UI thread; <see cref="Changed"/> fires there too.
 /// </summary>
 internal sealed class PenlightController : IDisposable
@@ -40,6 +40,11 @@ internal sealed class PenlightController : IDisposable
     private LightEngine _engine;
     private double _fadeTime = 0.6;
     private bool _breathing;
+    private double _vibrance = 0.4;
+    private double _minBrightness;
+    private bool _sceneCuts = true;
+    private bool _beatSync;
+    private SystemAudioMonitor? _audio;
     private readonly string _logPath;
     private readonly List<LampInfo> _lamps = new();
     private readonly List<string> _log = new();
@@ -68,9 +73,16 @@ internal sealed class PenlightController : IDisposable
                 {
                     var parts = line.Split('=', 2);
                     if (parts.Length != 2) continue;
-                    if (parts[0] == "fade" && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var fade))
-                        _fadeTime = Math.Clamp(fade, 0, 2);
-                    else if (parts[0] == "breathing") _breathing = parts[1] == "1";
+                    var number = double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed);
+                    switch (parts[0])
+                    {
+                        case "fade" when number: _fadeTime = Math.Clamp(parsed, 0, 2); break;
+                        case "vibrance" when number: _vibrance = Math.Clamp(parsed, 0, 1); break;
+                        case "minBrightness" when number: _minBrightness = Math.Clamp(parsed, 0, 0.5); break;
+                        case "breathing": _breathing = parts[1] == "1"; break;
+                        case "sceneCuts": _sceneCuts = parts[1] == "1"; break;
+                        case "beatSync": _beatSync = parts[1] == "1"; break;
+                    }
                 }
             }
             if (File.Exists(_settingsPath) && ulong.TryParse(File.ReadAllText(_settingsPath).Trim(), System.Globalization.NumberStyles.HexNumber, null, out var saved))
@@ -80,8 +92,13 @@ internal sealed class PenlightController : IDisposable
             }
         }
         catch (IOException) { }
-        _engine = new LightEngine(_fadeTime, _breathing);
+        _engine = MakeEngine();
     }
+
+    private LightEngine MakeEngine() => new(_fadeTime, _breathing)
+    {
+        Vibrance = _vibrance, MinBrightness = _minBrightness, SceneCuts = _sceneCuts, BeatSync = _beatSync,
+    };
 
     public event Action? Changed;
 
@@ -94,6 +111,8 @@ internal sealed class PenlightController : IDisposable
     public Rgb? LampColor { get; private set; }
     public string Status { get; private set; } = "正在檢查藍牙…";
     public string? ErrorMessage { get; private set; }
+    /// <summary>True while beats in the system audio are shaping the light.</summary>
+    public bool MusicDetected { get; private set; }
     public string LogPath => _logPath;
     public bool CanStart => BluetoothReady && Phase == Phase.Idle && _selectedAddress != null;
 
@@ -120,10 +139,94 @@ internal sealed class PenlightController : IDisposable
         }
     }
 
+    /// <summary>0 leaves colors as sampled; 1 strongly boosts saturation. Applies from the next sample.</summary>
+    public double Vibrance
+    {
+        get => _vibrance;
+        set
+        {
+            _vibrance = Math.Clamp(value, 0, 1);
+            _engine.Vibrance = _vibrance;
+            SaveEffects();
+        }
+    }
+
+    /// <summary>Lowest lamp brightness (0–0.5); 0 lets dark scenes go fully dark.</summary>
+    public double MinBrightness
+    {
+        get => _minBrightness;
+        set
+        {
+            _minBrightness = Math.Clamp(value, 0, 0.5);
+            _engine.MinBrightness = _minBrightness;
+            SaveEffects();
+        }
+    }
+
+    public bool SceneCuts
+    {
+        get => _sceneCuts;
+        set
+        {
+            _sceneCuts = value;
+            _engine.SceneCuts = value;
+            SaveEffects();
+        }
+    }
+
+    /// <summary>Pulses the lamp on beats in the system audio; starts or stops listening live while syncing.</summary>
+    public bool BeatSync
+    {
+        get => _beatSync;
+        set
+        {
+            _beatSync = value;
+            _engine.BeatSync = value;
+            SaveEffects();
+            if (Phase != Phase.Syncing) return;
+            if (value) StartAudio(); else StopAudio();
+            Notify();
+        }
+    }
+
     private void SaveEffects()
     {
-        var fade = _fadeTime.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        try { File.WriteAllText(_effectsPath, $"fade={fade}\nbreathing={(_breathing ? 1 : 0)}\n"); } catch (IOException) { }
+        string Number(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string Flag(bool value) => value ? "1" : "0";
+        var text = $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
+            + $"minBrightness={Number(_minBrightness)}\nsceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n";
+        try { File.WriteAllText(_effectsPath, text); } catch (IOException) { }
+    }
+
+    private void StartAudio()
+    {
+        if (_audio != null) return;
+        try
+        {
+            _audio = new SystemAudioMonitor(_ui, strength => _engine.Beat(strength), AudioFailed);
+            _audio.Start();
+            Log("開始聆聽系統聲音（節拍）。");
+        }
+        catch (Exception error)
+        {
+            AudioFailed(error.Message);
+        }
+    }
+
+    private void StopAudio()
+    {
+        _audio?.Dispose();
+        _audio = null;
+        MusicDetected = false;
+    }
+
+    /// <summary>Audio problems only turn off the beat effect; color sync keeps running.</summary>
+    private void AudioFailed(string message)
+    {
+        StopAudio();
+        ErrorMessage = $"無法聆聽系統聲音，節拍閃動已暫停：{message}";
+        Log($"音訊錯誤：{message}");
+        Notify();
     }
 
     public ulong? SelectedAddress
@@ -247,7 +350,8 @@ internal sealed class PenlightController : IDisposable
         Phase = Phase.Connecting;
         ScreenColor = null;
         LampColor = null;
-        _engine = new LightEngine(_fadeTime, _breathing);
+        _engine = MakeEngine();
+        MusicDetected = false;
         Status = "連線中…";
         Log($"連線 {PenlightProtocol.TargetName}（{LampInfo.FormatAddress(address)}）。");
         Notify();
@@ -280,6 +384,7 @@ internal sealed class PenlightController : IDisposable
             Phase = Phase.Syncing;
             Status = "連動中：跟隨主螢幕平均色。";
             Log("連動開始。");
+            if (_beatSync) StartAudio();
             Notify();
             _syncCts = new CancellationTokenSource();
             var token = _syncCts.Token;
@@ -357,6 +462,11 @@ internal sealed class PenlightController : IDisposable
             var now = DateTime.UtcNow;
             var frame = _engine.Step((now - last).TotalSeconds);
             last = now;
+            if (_engine.MusicDetected != MusicDetected)
+            {
+                MusicDetected = _engine.MusicDetected;
+                Notify();
+            }
             if (frame is { } color && color != LampColor)
             {
                 var writer = new DataWriter();
@@ -399,6 +509,7 @@ internal sealed class PenlightController : IDisposable
         Status = "停止中…";
         Notify();
         _syncCts?.Cancel();
+        StopAudio();
         if (_syncTask is { } task && !task.IsCompleted)
         {
             // Bound the wait for an outstanding sample or write acknowledgement.
@@ -451,6 +562,7 @@ internal sealed class PenlightController : IDisposable
     {
         StopScan();
         _syncCts?.Cancel();
+        StopAudio();
         ReleaseDevice();
     }
 

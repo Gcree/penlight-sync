@@ -18,9 +18,17 @@ internal sealed class MainForm : Form
         HeaderStyle = ColumnHeaderStyle.Nonclickable, Height = 96, Dock = DockStyle.Top,
     };
     private readonly Button _scanButton = new() { Text = "掃描手燈", AutoSize = true };
-    private readonly TrackBar _fadeTrack = new() { Minimum = 0, Maximum = 20, TickFrequency = 5, SmallChange = 1, LargeChange = 5, Width = 220, AutoSize = false, Height = 32 };
-    private readonly Label _fadeValue = new() { AutoSize = false, Width = 60, Height = 28, TextAlign = ContentAlignment.MiddleRight };
+    // Track values are in steps: vibrance and brightness 0.05, fade 0.1 s.
+    private readonly TrackBar _vibranceTrack = Track(20);
+    private readonly TrackBar _brightnessTrack = Track(10);
+    private readonly TrackBar _fadeTrack = Track(20);
+    private readonly Label _vibranceValue = TrackValue();
+    private readonly Label _brightnessValue = TrackValue();
+    private readonly Label _fadeValue = TrackValue();
+    private readonly CheckBox _sceneCutsCheck = new() { Text = "換場快切（畫面大幅換色時加快漸變）", AutoSize = true };
     private readonly CheckBox _breathingCheck = new() { Text = "呼吸律動（畫面顏色穩定時，亮度緩慢起伏）", AutoSize = true };
+    private readonly CheckBox _beatSyncCheck = new() { Text = "跟音樂節拍閃動（聆聽系統播放的聲音）", AutoSize = true };
+    private readonly Label _musicLabel = new() { Text = "♪ 偵測到節拍", AutoSize = true, ForeColor = Color.SeaGreen, Margin = new Padding(6, 5, 0, 0) };
     private readonly Button _startButton = new() { Text = "▶ 開始連動", Height = 40, Dock = DockStyle.Top };
     private readonly Label _error = new() { AutoSize = true, MaximumSize = new Size(380, 0), ForeColor = Color.Firebrick };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font(FontFamily.GenericMonospace, 8.5f) };
@@ -33,7 +41,7 @@ internal sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(420, 720);
+        ClientSize = new Size(420, 860);
         StartPosition = FormStartPosition.CenterScreen;
 
         _lampList.Columns.Add("手燈", 150);
@@ -58,15 +66,17 @@ internal sealed class MainForm : Form
         lampBox.Controls.Add(_lampList);
         lampBox.Controls.Add(scanRow);
 
-        var effectsBox = new GroupBox { Text = "燈光效果", Dock = DockStyle.Top, Height = 100, Padding = new Padding(8) };
-        var fadeRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
-        fadeRow.Controls.Add(new Label { Text = "漸變時間", AutoSize = false, Width = 70, Height = 28, TextAlign = ContentAlignment.MiddleLeft });
-        fadeRow.Controls.Add(_fadeTrack);
-        fadeRow.Controls.Add(_fadeValue);
-        var breathingRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
-        breathingRow.Controls.Add(_breathingCheck);
-        effectsBox.Controls.Add(breathingRow);
-        effectsBox.Controls.Add(fadeRow);
+        var effectsBox = new GroupBox { Text = "燈光效果", Dock = DockStyle.Top, Height = 230, Padding = new Padding(8) };
+        var beatRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
+        beatRow.Controls.Add(_beatSyncCheck);
+        beatRow.Controls.Add(_musicLabel);
+        // Dock order: controls added later dock first, so add bottom-up.
+        effectsBox.Controls.Add(beatRow);
+        effectsBox.Controls.Add(CheckRow(_breathingCheck));
+        effectsBox.Controls.Add(CheckRow(_sceneCutsCheck));
+        effectsBox.Controls.Add(TrackRow("漸變時間", _fadeTrack, _fadeValue));
+        effectsBox.Controls.Add(TrackRow("最低亮度", _brightnessTrack, _brightnessValue));
+        effectsBox.Controls.Add(TrackRow("鮮豔度", _vibranceTrack, _vibranceValue));
 
         var errorRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         errorRow.Controls.Add(_error);
@@ -74,7 +84,7 @@ internal sealed class MainForm : Form
         var logLabel = new Label { Text = "執行記錄", Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.BottomLeft, ForeColor = SystemColors.GrayText };
         var footer = new Label
         {
-            Text = "取色範圍是整個主螢幕；只送出改變的顏色，不儲存或上傳畫面。",
+            Text = "取色範圍是整個主螢幕（略過黑邊與字幕）；只送出改變的顏色，畫面與聲音都不儲存或上傳。",
             Dock = DockStyle.Bottom, Height = 36, TextAlign = ContentAlignment.MiddleLeft, ForeColor = SystemColors.GrayText,
             Font = new Font(Font.FontFamily, 8.5f),
         };
@@ -96,14 +106,36 @@ internal sealed class MainForm : Form
 
         _controller = new PenlightController();
         _controller.Changed += Render;
+        _vibranceTrack.Value = (int)Math.Round(_controller.Vibrance * 20);
+        _brightnessTrack.Value = (int)Math.Round(_controller.MinBrightness * 20);
         _fadeTrack.Value = (int)Math.Round(_controller.FadeTime * 10);
+        _sceneCutsCheck.Checked = _controller.SceneCuts;
         _breathingCheck.Checked = _controller.Breathing;
+        _beatSyncCheck.Checked = _controller.BeatSync;
+        _vibranceTrack.ValueChanged += (_, _) =>
+        {
+            _controller.Vibrance = _vibranceTrack.Value / 20.0;
+            Render();
+        };
+        _brightnessTrack.ValueChanged += (_, _) =>
+        {
+            _controller.MinBrightness = _brightnessTrack.Value / 20.0;
+            Render();
+        };
         _fadeTrack.ValueChanged += (_, _) =>
         {
             _controller.FadeTime = _fadeTrack.Value / 10.0;
             Render();
         };
+        _sceneCutsCheck.CheckedChanged += (_, _) => _controller.SceneCuts = _sceneCutsCheck.Checked;
         _breathingCheck.CheckedChanged += (_, _) => _controller.Breathing = _breathingCheck.Checked;
+        _beatSyncCheck.CheckedChanged += (_, _) => _controller.BeatSync = _beatSyncCheck.Checked;
+        // Keep the whole window on small or high-DPI screens; the log area absorbs the difference.
+        Load += (_, _) =>
+        {
+            var available = Screen.FromControl(this).WorkingArea.Height;
+            if (Height > available) Height = available;
+        };
         _scanButton.Click += (_, _) =>
         {
             if (_controller.IsScanning) _controller.StopScan(); else _controller.StartScan();
@@ -128,7 +160,10 @@ internal sealed class MainForm : Form
         SetSwatch(_screenSwatch, _screenHex, _controller.ScreenColor);
         SetSwatch(_lampSwatch, _lampHex, _controller.LampColor);
         _status.Text = _controller.Status;
+        _vibranceValue.Text = $"{_controller.Vibrance * 100:0}%";
+        _brightnessValue.Text = _controller.MinBrightness == 0 ? "關" : $"{_controller.MinBrightness * 100:0}%";
         _fadeValue.Text = _controller.FadeTime == 0 ? "立即" : $"{_controller.FadeTime:0.0} 秒";
+        _musicLabel.Visible = _controller.MusicDetected;
         _statusDot.BackColor = _controller.Phase switch
         {
             Phase.Syncing => Color.SeaGreen,
@@ -171,6 +206,27 @@ internal sealed class MainForm : Form
     {
         swatch.BackColor = color is { } c ? Color.FromArgb(c.Red, c.Green, c.Blue) : SystemColors.ControlLight;
         hex.Text = color?.ToString() ?? "—";
+    }
+
+    private static TrackBar Track(int maximum) =>
+        new() { Minimum = 0, Maximum = maximum, TickFrequency = 5, SmallChange = 1, LargeChange = 5, Width = 220, AutoSize = false, Height = 32 };
+
+    private static Label TrackValue() => new() { AutoSize = false, Width = 60, Height = 28, TextAlign = ContentAlignment.MiddleRight };
+
+    private static Control TrackRow(string title, TrackBar track, Label value)
+    {
+        var row = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
+        row.Controls.Add(new Label { Text = title, AutoSize = false, Width = 70, Height = 28, TextAlign = ContentAlignment.MiddleLeft });
+        row.Controls.Add(track);
+        row.Controls.Add(value);
+        return row;
+    }
+
+    private static Control CheckRow(CheckBox check)
+    {
+        var row = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        row.Controls.Add(check);
+        return row;
     }
 
     private static Panel Swatch() => new() { Size = new Size(150, 90), BorderStyle = BorderStyle.FixedSingle, Anchor = AnchorStyles.Top };

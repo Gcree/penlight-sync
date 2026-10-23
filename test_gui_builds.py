@@ -19,6 +19,8 @@ class MacAppTests(unittest.TestCase):
                     str(SOURCES / "ScreenColor.swift"),
                     str(SOURCES / "PenlightProtocol.swift"),
                     str(SOURCES / "PenlightApp" / "LightEngine.swift"),
+                    str(SOURCES / "PenlightApp" / "BeatDetector.swift"),
+                    str(SOURCES / "PenlightApp" / "SystemAudioMonitor.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightController.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightApp.swift"),
                     "-o",
@@ -48,9 +50,9 @@ class MacAppTests(unittest.TestCase):
             ["ScreenColor.swift", "ScreenColorTests.swift"], "ScreenColorSampler self-tests passed", parse_as_library=False
         )
 
-    def test_light_engine_fade_and_breathing(self):
+    def test_light_engine_effects_and_beat_detector(self):
         self.compile_and_run(
-            ["ScreenColor.swift", "PenlightApp/LightEngine.swift", "PenlightApp/LightEngineTests.swift"],
+            ["ScreenColor.swift", "PenlightApp/LightEngine.swift", "PenlightApp/BeatDetector.swift", "PenlightApp/LightEngineTests.swift"],
             "LightEngine self-tests passed",
         )
 

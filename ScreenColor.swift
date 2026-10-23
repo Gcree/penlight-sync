@@ -87,7 +87,11 @@ public struct ScreenColorSampler {
         return color
     }
 
-    /// Average color of 8-bit premultiplied RGBA rows. Transparent pixels are skipped.
+    /// Video-oriented average of 8-bit premultiplied RGBA rows. Transparent pixels are skipped.
+    /// - Letterbox/pillarbox bars (near-black edge rows and columns) are trimmed.
+    /// - Near-white pixels in the bottom quarter (subtitles) are skipped.
+    /// - Pixels near the center count up to twice as much as the corners.
+    /// A frame that is entirely black, white, or subtitle-like falls back to its plain average.
     /// Returns nil for malformed or fully transparent buffers.
     public static func averageColor(
         pixels: [UInt8],
@@ -102,24 +106,48 @@ public struct ScreenColorSampler {
         let requiredBytes = (height - 1) * bytesPerRow + rowBytes
         guard pixels.count >= requiredBytes else { return nil }
 
-        var redSum = 0, greenSum = 0, blueSum = 0, count = 0
-        for y in 0..<height {
-            let row = y * bytesPerRow
-            for x in 0..<width {
-                let offset = row + x * 4
-                let alpha = Int(pixels[offset + 3])
-                guard alpha > 0 else { continue }
-                redSum += min(255, Int(pixels[offset]) * 255 / alpha)
-                greenSum += min(255, Int(pixels[offset + 1]) * 255 / alpha)
-                blueSum += min(255, Int(pixels[offset + 2]) * 255 / alpha)
-                count += 1
+        func pixel(_ x: Int, _ y: Int) -> (r: Int, g: Int, b: Int)? {
+            let offset = y * bytesPerRow + x * 4
+            let alpha = Int(pixels[offset + 3])
+            guard alpha > 0 else { return nil }
+            return (
+                min(255, Int(pixels[offset]) * 255 / alpha),
+                min(255, Int(pixels[offset + 1]) * 255 / alpha),
+                min(255, Int(pixels[offset + 2]) * 255 / alpha)
+            )
+        }
+        func isBar(_ p: (r: Int, g: Int, b: Int)?) -> Bool {
+            guard let p else { return true }
+            return max(p.r, p.g, p.b) < 16
+        }
+
+        // Trim letterbox rows and pillarbox columns while they are entirely near-black.
+        var top = 0, bottom = height - 1, left = 0, right = width - 1
+        while top < bottom, (left...right).allSatisfy({ isBar(pixel($0, top)) }) { top += 1 }
+        while bottom > top, (left...right).allSatisfy({ isBar(pixel($0, bottom)) }) { bottom -= 1 }
+        while left < right, (top...bottom).allSatisfy({ isBar(pixel(left, $0)) }) { left += 1 }
+        while right > left, (top...bottom).allSatisfy({ isBar(pixel(right, $0)) }) { right -= 1 }
+
+        let subtitleTop = bottom - (bottom - top + 1) / 4 + 1
+        var content = (r: 0.0, g: 0.0, b: 0.0, w: 0.0)
+        var all = (r: 0.0, g: 0.0, b: 0.0, w: 0.0)
+        for y in top...bottom {
+            for x in left...right {
+                guard let p = pixel(x, y) else { continue }
+                let nx = (Double(x - left) + 0.5) / Double(right - left + 1) * 2 - 1
+                let ny = (Double(y - top) + 0.5) / Double(bottom - top + 1) * 2 - 1
+                let weight = 2 - min(1, (nx * nx + ny * ny).squareRoot() / 2.0.squareRoot())
+                all = (all.r + Double(p.r) * weight, all.g + Double(p.g) * weight, all.b + Double(p.b) * weight, all.w + weight)
+                if y >= subtitleTop, min(p.r, p.g, p.b) > 200 { continue }
+                content = (content.r + Double(p.r) * weight, content.g + Double(p.g) * weight, content.b + Double(p.b) * weight, content.w + weight)
             }
         }
-        guard count > 0 else { return nil }
+        let chosen = content.w > 0 ? content : all
+        guard chosen.w > 0 else { return nil }
         return ScreenRGB(
-            red: UInt8((redSum + count / 2) / count),
-            green: UInt8((greenSum + count / 2) / count),
-            blue: UInt8((blueSum + count / 2) / count)
+            red: UInt8((chosen.r / chosen.w).rounded()),
+            green: UInt8((chosen.g / chosen.w).rounded()),
+            blue: UInt8((chosen.b / chosen.w).rounded())
         )
     }
 }

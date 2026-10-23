@@ -10,3 +10,7 @@ The RGB frame and device protocol constants were verified against Polyfish0's pu
 `PenlightProtocol.swift` independently implements that protocol using macOS CommonCrypto. No official application was unpacked or decompiled for this work. The protocol's public fixed key is a device protocol constant, not a user credential.
 
 This project is distributed under GPL-3.0 (see LICENSE). It is an unofficial personal tool and is not affiliated with Ado or Ruifan Japan.
+
+# Third-party components
+
+The Windows build uses [NAudio](https://github.com/naudio/NAudio) (`NAudio.Wasapi` / `NAudio.Core` 2.2.1, MIT License, © Mark Heath and contributors) for WASAPI loopback capture of system audio, which feeds the beat detector. It is bundled into `PenlightSync.exe`.
