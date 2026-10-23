@@ -146,6 +146,22 @@ Check(Math.Abs(darkRed[0] - 51) < 0.01 && Math.Abs(darkRed[1] - 25.5) < 0.01, "f
 Check(LightEngine.Grade(black, 0, 0.2).SequenceEqual(new double[] { 51, 51, 51 }), "floor lights black as dim white");
 Check(LightEngine.Grade(new Rgb(200, 0, 0), 0, 0.2).SequenceEqual(new double[] { 200, 0, 0 }), "floor leaves bright colors");
 
+// Color temperature and overall brightness: same cases as LightEngineTests.swift.
+var gray200 = new Rgb(200, 200, 200);
+Check(LightEngine.Grade(gray200, 0, 0, 0, 1).SequenceEqual(new double[] { 200, 200, 200 }), "neutral temperature and full brightness");
+var warm = LightEngine.Grade(gray200, 0, 0, warmth: 1);
+Check(warm[0] == 200 && warm[1] < 200 && warm[2] < warm[1], "warm keeps red and dims blue most");
+var cool = LightEngine.Grade(gray200, 0, 0, warmth: -1);
+Check(cool[2] == 200 && cool[1] < 200 && cool[0] < cool[1], "cool keeps blue and dims red most");
+Check(LightEngine.Grade(gray200, 0, 0, brightness: 0.5).SequenceEqual(new double[] { 100, 100, 100 }), "brightness scales output");
+Check(LightEngine.Grade(black, 0, 0.2, brightness: 0.5).SequenceEqual(new double[] { 25.5, 25.5, 25.5 }), "brightness applies after the floor");
+var dimmed = new LightEngine(0, breathing: false) { Brightness = 0.5 };
+dimmed.SetTarget(gray200);
+Check(dimmed.Step(0.05) == new Rgb(100, 100, 100), "engine applies brightness");
+Check(ColorPreset.All.Select(p => p.Name).SequenceEqual(new[] { "自然", "標準", "鮮豔", "演唱會", "電影院" }), "presets match the Mac app");
+Check(ColorPreset.All.All(p => p.Vibrance is >= 0 and <= 1 && p.MinBrightness is >= 0 and <= 0.5 && p.Brightness is >= 0.1 and <= 1 && p.Warmth is >= -0.5 and <= 0.5), "presets fit the slider ranges");
+Check(ColorPreset.Standard.Matches(0.4, 0, 1, 0), "standard preset is the default look");
+
 // Beat sync: dims between beats, pops on beats, releases in silence.
 var music = new LightEngine(0.6, breathing: false) { BeatSync = true };
 music.SetTarget(white);

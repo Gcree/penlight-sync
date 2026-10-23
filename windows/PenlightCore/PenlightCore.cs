@@ -99,7 +99,7 @@ public static class AverageColor
 }
 
 /// <summary>
-/// Port of LightEngine.swift: grades each sample (vibrance, brightness floor), fades toward it (faster after a
+/// Port of LightEngine.swift: grades each sample (vibrance, color temperature, brightness floor, overall brightness), fades toward it (faster after a
 /// scene cut), adds an optional breath while the color is steady, and optional beat sync that dims between
 /// beats and pops on each beat only while beats keep arriving. With a known tempo, fades speed up for fast songs
 /// (and slow down for slow ones) and each flash lasts about a third of a beat.
@@ -150,6 +150,10 @@ public sealed class LightEngine
     public double Vibrance { get; set; }
     /// <summary>Lowest brightness (0–1) the lamp shows; 0 lets dark scenes go fully dark.</summary>
     public double MinBrightness { get; set; }
+    /// <summary>-1 (cool) … 0 (as sampled) … 1 (warm).</summary>
+    public double Warmth { get; set; }
+    /// <summary>Overall output level (0–1), applied after the brightness floor.</summary>
+    public double Brightness { get; set; } = 1;
     public bool SceneCuts { get; set; } = true;
     public bool BeatSync { get; set; }
 
@@ -161,7 +165,7 @@ public sealed class LightEngine
 
     public void SetTarget(Rgb rgb)
     {
-        var next = Grade(rgb, Vibrance, MinBrightness);
+        var next = Grade(rgb, Vibrance, MinBrightness, Warmth, Brightness);
         if (_target == null) _current = (double[])next.Clone(); // The first sample shows immediately instead of fading in from black.
         else if (SceneCuts && Distance(next, _current) > CutDistance) _cutInProgress = true;
         _target = next;
@@ -211,9 +215,10 @@ public sealed class LightEngine
 
     /// <summary>
     /// Boosts saturation along a curve that lifts dull colors most, keeps hue and brightness,
-    /// then raises brightness to at least <paramref name="minBrightness"/>.
+    /// shifts toward warm or cool, raises brightness to at least <paramref name="minBrightness"/>, then scales by
+    /// <paramref name="brightness"/>.
     /// </summary>
-    public static double[] Grade(Rgb rgb, double vibrance, double minBrightness)
+    public static double[] Grade(Rgb rgb, double vibrance, double minBrightness, double warmth = 0, double brightness = 1)
     {
         double[] channels = { rgb.Red, rgb.Green, rgb.Blue };
         var maximum = channels.Max();
@@ -224,10 +229,23 @@ public sealed class LightEngine
             var boosted = 1 - Math.Pow(1 - saturation, 1 + 3 * Math.Min(1, vibrance));
             channels = channels.Select(c => maximum - (maximum - c) * boosted / saturation).ToArray();
         }
+        // Temperature only ever dims the opposite channels, so it cannot clip.
+        var warm = Math.Clamp(warmth, -1, 1);
+        if (warm > 0)
+        {
+            channels[1] *= 1 - 0.15 * warm;
+            channels[2] *= 1 - 0.6 * warm;
+        }
+        else if (warm < 0)
+        {
+            channels[0] *= 1 + 0.6 * warm;
+            channels[1] *= 1 + 0.15 * warm;
+        }
         var floor = 255 * Math.Clamp(minBrightness, 0, 1);
         if (maximum < floor)
             channels = maximum > 0 ? channels.Select(c => c * floor / maximum).ToArray() : new[] { floor, floor, floor };
-        return channels;
+        var level = Math.Clamp(brightness, 0, 1);
+        return channels.Select(c => c * level).ToArray();
     }
 
     private static double Distance(double[] a, double[] b) =>
@@ -322,6 +340,26 @@ public sealed class BeatDetector
         while (tempo > MaxTempo) tempo /= 2;
         Bpm = tempo;
     }
+}
+
+/// <summary>Port of ColorPreset in LightEngine.swift: one-click combinations of the color settings.</summary>
+public sealed record ColorPreset(string Name, double Vibrance, double MinBrightness, double Brightness, double Warmth)
+{
+    public static readonly IReadOnlyList<ColorPreset> All = new[]
+    {
+        new ColorPreset("自然", 0.2, 0, 1, 0),
+        new ColorPreset("標準", 0.4, 0, 1, 0),
+        new ColorPreset("鮮豔", 0.75, 0.1, 1, 0),
+        new ColorPreset("演唱會", 0.9, 0.2, 1, -0.1),
+        new ColorPreset("電影院", 0.3, 0.05, 0.7, 0.15),
+    };
+
+    /// <summary>The defaults a fresh install starts with.</summary>
+    public static ColorPreset Standard => All[1];
+
+    public bool Matches(double vibrance, double minBrightness, double brightness, double warmth) =>
+        Math.Abs(Vibrance - vibrance) < 0.001 && Math.Abs(MinBrightness - minBrightness) < 0.001
+        && Math.Abs(Brightness - brightness) < 0.001 && Math.Abs(Warmth - warmth) < 0.001;
 }
 
 /// <summary>Port of ReleaseVersion in PenlightApp/UpdateChecker.swift: release tags such as "v1.4.0", compared part by part.</summary>

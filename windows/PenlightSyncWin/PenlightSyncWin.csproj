@@ -14,7 +14,7 @@
     <AssemblyName>PenlightSync</AssemblyName>
     <ApplicationIcon>../../icon/AppIcon.ico</ApplicationIcon>
     <Product>Ado 手燈連動</Product>
-    <Version>1.5.0</Version>
+    <Version>1.6.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../PenlightCore/PenlightCore.csproj" />

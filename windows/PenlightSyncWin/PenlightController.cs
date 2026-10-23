@@ -51,6 +51,8 @@ internal sealed class PenlightController : IDisposable
     private bool _breathing;
     private double _vibrance = 0.4;
     private double _minBrightness;
+    private double _warmth;
+    private double _brightness = 1;
     private bool _sceneCuts = true;
     private bool _beatSync;
     private RectangleF? _region;
@@ -97,6 +99,8 @@ internal sealed class PenlightController : IDisposable
                         case "fade" when number: _fadeTime = Math.Clamp(parsed, 0, 2); break;
                         case "vibrance" when number: _vibrance = Math.Clamp(parsed, 0, 1); break;
                         case "minBrightness" when number: _minBrightness = Math.Clamp(parsed, 0, 0.5); break;
+                        case "warmth" when number: _warmth = Math.Clamp(parsed, -0.5, 0.5); break;
+                        case "brightness" when number: _brightness = Math.Clamp(parsed, 0.1, 1); break;
                         case "breathing": _breathing = parts[1] == "1"; break;
                         case "sceneCuts": _sceneCuts = parts[1] == "1"; break;
                         case "beatSync": _beatSync = parts[1] == "1"; break;
@@ -123,7 +127,8 @@ internal sealed class PenlightController : IDisposable
 
     private LightEngine MakeEngine() => new(EffectiveFadeTime, _breathing)
     {
-        Vibrance = _vibrance, MinBrightness = _minBrightness, SceneCuts = _sceneCuts, BeatSync = _beatSync,
+        Vibrance = _vibrance, MinBrightness = _minBrightness, Warmth = _warmth, Brightness = _brightness,
+        SceneCuts = _sceneCuts, BeatSync = _beatSync,
     };
 
     public event Action? Changed;
@@ -205,6 +210,54 @@ internal sealed class PenlightController : IDisposable
         }
     }
 
+    /// <summary>-0.5 (cool) … 0.5 (warm). Applies from the next sample.</summary>
+    public double Warmth
+    {
+        get => _warmth;
+        set
+        {
+            _warmth = Math.Clamp(value, -0.5, 0.5);
+            _engine.Warmth = _warmth;
+            SaveEffects();
+        }
+    }
+
+    /// <summary>Overall lamp level (0.1–1). Applies from the next sample.</summary>
+    public double Brightness
+    {
+        get => _brightness;
+        set
+        {
+            _brightness = Math.Clamp(value, 0.1, 1);
+            _engine.Brightness = _brightness;
+            SaveEffects();
+        }
+    }
+
+    /// <summary>The preset whose color settings match the current ones, if any.</summary>
+    public ColorPreset? ActivePreset => ColorPreset.All.FirstOrDefault(p => p.Matches(_vibrance, _minBrightness, _brightness, _warmth));
+
+    public void Apply(ColorPreset preset)
+    {
+        Vibrance = preset.Vibrance;
+        MinBrightness = preset.MinBrightness;
+        Brightness = preset.Brightness;
+        Warmth = preset.Warmth;
+        Notify();
+    }
+
+    /// <summary>Puts every light effect back to its default; the lamp choice and capture area stay.</summary>
+    public void ResetEffects()
+    {
+        Apply(ColorPreset.Standard);
+        FadeTime = 0.6;
+        LowLatency = false;
+        SceneCuts = true;
+        Breathing = false;
+        BeatSync = false;
+        Notify();
+    }
+
     public bool SceneCuts
     {
         get => _sceneCuts;
@@ -252,7 +305,8 @@ internal sealed class PenlightController : IDisposable
         string Number(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string Flag(bool value) => value ? "1" : "0";
         var text = $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
-            + $"minBrightness={Number(_minBrightness)}\nsceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n"
+            + $"minBrightness={Number(_minBrightness)}\nwarmth={Number(_warmth)}\nbrightness={Number(_brightness)}\n"
+            + $"sceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n"
             + $"lowLatency={Flag(_lowLatency)}\n";
         if (_region is { } r) text += $"region={Number(r.X)},{Number(r.Y)},{Number(r.Width)},{Number(r.Height)}\n";
         try { File.WriteAllText(_effectsPath, text); } catch (IOException) { }
@@ -321,7 +375,7 @@ internal sealed class PenlightController : IDisposable
                 else
                 {
                     BluetoothReady = true;
-                    Status = "藍牙就緒。按「掃描手燈」尋找手燈。";
+                    Status = "藍牙就緒。按「掃描」尋找手燈。";
                 }
             }
         }

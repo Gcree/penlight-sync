@@ -9,6 +9,8 @@ private let fadeTimeKey = "fadeTime"
 private let breathingKey = "breathing"
 private let vibranceKey = "vibrance"
 private let minBrightnessKey = "minBrightness"
+private let warmthKey = "warmth"
+private let brightnessKey = "brightness"
 private let sceneCutsKey = "sceneCuts"
 private let beatSyncKey = "beatSync"
 private let captureRegionKey = "captureRegion"
@@ -75,12 +77,30 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         didSet {
             engine.vibrance = vibrance
             UserDefaults.standard.set(vibrance, forKey: vibranceKey)
+            regrade()
         }
     }
     @Published var minBrightness: Double {
         didSet {
             engine.minBrightness = minBrightness
             UserDefaults.standard.set(minBrightness, forKey: minBrightnessKey)
+            regrade()
+        }
+    }
+    /// -1 (cool) … 1 (warm); the UI offers ±0.5.
+    @Published var warmth: Double {
+        didSet {
+            engine.warmth = warmth
+            UserDefaults.standard.set(warmth, forKey: warmthKey)
+            regrade()
+        }
+    }
+    /// Overall lamp level (0.1–1).
+    @Published var brightness: Double {
+        didSet {
+            engine.brightness = brightness
+            UserDefaults.standard.set(brightness, forKey: brightnessKey)
+            regrade()
         }
     }
     @Published var sceneCuts: Bool {
@@ -149,6 +169,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         breathing = defaults.bool(forKey: breathingKey)
         vibrance = defaults.object(forKey: vibranceKey) as? Double ?? 0.4
         minBrightness = defaults.object(forKey: minBrightnessKey) as? Double ?? 0
+        warmth = defaults.object(forKey: warmthKey) as? Double ?? 0
+        brightness = defaults.object(forKey: brightnessKey) as? Double ?? 1
         sceneCuts = defaults.object(forKey: sceneCutsKey) as? Bool ?? true
         beatSync = defaults.bool(forKey: beatSyncKey)
         lowLatency = defaults.bool(forKey: lowLatencyKey)
@@ -167,6 +189,31 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
 
     var canStart: Bool {
         bluetoothReady && phase == .idle && selectedLampID != nil
+    }
+
+    /// The preset whose color settings match the current ones, if any.
+    var activePreset: ColorPreset? {
+        ColorPreset.all.first {
+            abs($0.vibrance - vibrance) < 0.001 && abs($0.minBrightness - minBrightness) < 0.001
+                && abs($0.brightness - brightness) < 0.001 && abs($0.warmth - warmth) < 0.001
+        }
+    }
+
+    func apply(_ preset: ColorPreset) {
+        vibrance = preset.vibrance
+        minBrightness = preset.minBrightness
+        brightness = preset.brightness
+        warmth = preset.warmth
+    }
+
+    /// Puts every light effect back to its default; the lamp choice and capture area stay.
+    func resetEffects() {
+        apply(.standard)
+        fadeTime = 0.6
+        lowLatency = false
+        sceneCuts = true
+        breathing = false
+        beatSync = false
     }
 
     // MARK: - Actions
@@ -209,7 +256,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         }
         needsScreenPermission = false
         guard let target = peripherals[id] ?? central.retrievePeripherals(withIdentifiers: [id]).first else {
-            fail("找不到選擇的手燈。請先按「掃描手燈」。")
+            fail("找不到選擇的手燈。請先按「掃描」。")
             return
         }
         guard target.name == targetName else {
@@ -248,7 +295,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         bluetoothReady = central.state == .poweredOn
         switch central.state {
         case .poweredOn:
-            status = "藍牙就緒。按「掃描手燈」尋找手燈。"
+            status = "藍牙就緒。按「掃描」尋找手燈。"
             restoreRememberedLamp()
         case .unauthorized:
             status = "未允許藍牙權限。請在「系統設定 › 隱私權與安全性 › 藍牙」允許本 App。"
@@ -644,12 +691,20 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         captureRegion == nil ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。"
     }
 
+    /// Re-grades the last screen color so color changes show right away, even on a still screen.
+    private func regrade() {
+        guard phase == .syncing || phase == .reconnecting, let screenColor else { return }
+        engine.setTarget(screenColor)
+    }
+
     private var effectiveFadeTime: TimeInterval { lowLatency ? min(fadeTime, Self.lowLatencyFade) : fadeTime }
 
     private func makeEngine() -> LightEngine {
         var engine = LightEngine(fadeTime: effectiveFadeTime, breathing: breathing)
         engine.vibrance = vibrance
         engine.minBrightness = minBrightness
+        engine.warmth = warmth
+        engine.brightness = brightness
         engine.sceneCuts = sceneCuts
         engine.beatSync = beatSync
         return engine

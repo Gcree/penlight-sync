@@ -1,7 +1,8 @@
 import Foundation
 
 /// Turns sparse screen samples (and optional music beats) into a smooth lamp color stream:
-/// - each sample is graded (vibrance boost, brightness floor) so averaged video colors don't look muddy;
+/// - each sample is graded (vibrance boost, color temperature, brightness floor, overall brightness) so averaged
+///   video colors don't look muddy;
 /// - output fades exponentially toward the graded sample, faster right after a scene cut;
 /// - an optional slow brightness "breath" appears only while the color is steady;
 /// - optional beat sync dims the lamp slightly between beats and pops it back up on each beat,
@@ -38,6 +39,10 @@ struct LightEngine {
     var vibrance: Double = 0
     /// Lowest brightness (0–1) the lamp shows; 0 lets dark scenes go fully dark.
     var minBrightness: Double = 0
+    /// -1 (cool) … 0 (as sampled) … 1 (warm).
+    var warmth: Double = 0
+    /// Overall output level (0–1), applied after the brightness floor.
+    var brightness: Double = 1
     var sceneCuts = true
     var beatSync = false
 
@@ -63,7 +68,7 @@ struct LightEngine {
     var bpm: Double? { musicDetected ? tempo : nil }
 
     mutating func setTarget(_ rgb: ScreenRGB) {
-        let next = Self.grade(rgb, vibrance: vibrance, minBrightness: minBrightness)
+        let next = Self.grade(rgb, vibrance: vibrance, minBrightness: minBrightness, warmth: warmth, brightness: brightness)
         if target == nil {
             current = next // The first sample shows immediately instead of fading in from black.
         } else if sceneCuts, Self.distance(next, current) > Self.cutDistance {
@@ -117,8 +122,8 @@ struct LightEngine {
     }
 
     /// Boosts saturation along a curve that lifts dull colors most, keeps hue and brightness,
-    /// then raises brightness to at least `minBrightness`.
-    static func grade(_ rgb: ScreenRGB, vibrance: Double, minBrightness: Double) -> [Double] {
+    /// shifts toward warm or cool, raises brightness to at least `minBrightness`, then scales by `brightness`.
+    static func grade(_ rgb: ScreenRGB, vibrance: Double, minBrightness: Double, warmth: Double = 0, brightness: Double = 1) -> [Double] {
         var channels = [Double(rgb.red), Double(rgb.green), Double(rgb.blue)]
         let maximum = channels.max()!
         let minimum = channels.min()!
@@ -127,14 +132,44 @@ struct LightEngine {
             let boosted = 1 - pow(1 - saturation, 1 + 3 * min(1, vibrance))
             channels = channels.map { maximum - (maximum - $0) * boosted / saturation }
         }
+        // Temperature only ever dims the opposite channels, so it cannot clip.
+        let warm = min(1, max(-1, warmth))
+        if warm > 0 {
+            channels[1] *= 1 - 0.15 * warm
+            channels[2] *= 1 - 0.6 * warm
+        } else if warm < 0 {
+            channels[0] *= 1 + 0.6 * warm
+            channels[1] *= 1 + 0.15 * warm
+        }
         let floor = 255 * min(1, max(0, minBrightness))
         if maximum < floor {
             channels = maximum > 0 ? channels.map { $0 * floor / maximum } : [floor, floor, floor]
         }
-        return channels
+        let level = min(1, max(0, brightness))
+        return channels.map { $0 * level }
     }
 
     private static func distance(_ a: [Double], _ b: [Double]) -> Double {
         zip(a, b).map { ($1 - $0) * ($1 - $0) }.reduce(0, +).squareRoot()
     }
+}
+
+/// One-click combinations of the color settings offered in the apps (mirrored in PenlightCore.cs).
+struct ColorPreset: Identifiable, Equatable {
+    let name: String
+    let vibrance: Double
+    let minBrightness: Double
+    let brightness: Double
+    let warmth: Double
+    var id: String { name }
+
+    static let all = [
+        ColorPreset(name: "自然", vibrance: 0.2, minBrightness: 0, brightness: 1, warmth: 0),
+        ColorPreset(name: "標準", vibrance: 0.4, minBrightness: 0, brightness: 1, warmth: 0),
+        ColorPreset(name: "鮮豔", vibrance: 0.75, minBrightness: 0.1, brightness: 1, warmth: 0),
+        ColorPreset(name: "演唱會", vibrance: 0.9, minBrightness: 0.2, brightness: 1, warmth: -0.1),
+        ColorPreset(name: "電影院", vibrance: 0.3, minBrightness: 0.05, brightness: 0.7, warmth: 0.15),
+    ]
+    /// The defaults a fresh install starts with.
+    static let standard = all[1]
 }

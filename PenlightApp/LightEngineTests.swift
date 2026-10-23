@@ -88,6 +88,22 @@ struct LightEngineTest {
         expect(LightEngine.grade(ScreenRGB(red: 200, green: 0, blue: 0), vibrance: 0, minBrightness: 0.2) == [200, 0, 0],
                "Floor must not touch bright colors.")
 
+        // Color temperature and overall brightness.
+        let gray200 = ScreenRGB(red: 200, green: 200, blue: 200)
+        expect(LightEngine.grade(gray200, vibrance: 0, minBrightness: 0, warmth: 0, brightness: 1) == [200, 200, 200],
+               "Neutral temperature and full brightness must not change colors.")
+        let warm = LightEngine.grade(gray200, vibrance: 0, minBrightness: 0, warmth: 1)
+        expect(warm[0] == 200 && warm[1] < 200 && warm[2] < warm[1], "Warm must keep red and dim blue most: \(warm)")
+        let cool = LightEngine.grade(gray200, vibrance: 0, minBrightness: 0, warmth: -1)
+        expect(cool[2] == 200 && cool[1] < 200 && cool[0] < cool[1], "Cool must keep blue and dim red most: \(cool)")
+        expect(LightEngine.grade(gray200, vibrance: 0, minBrightness: 0, brightness: 0.5) == [100, 100, 100], "Brightness must scale output.")
+        expect(LightEngine.grade(ScreenRGB(red: 0, green: 0, blue: 0), vibrance: 0, minBrightness: 0.2, brightness: 0.5) == [25.5, 25.5, 25.5],
+               "Brightness applies after the floor.")
+        var dimmed = LightEngine(fadeTime: 0, breathing: false)
+        dimmed.brightness = 0.5
+        dimmed.setTarget(gray200)
+        expect(dimmed.step(dt: 0.05) == ScreenRGB(red: 100, green: 100, blue: 100), "Engine must apply brightness.")
+
         // Beat sync: dims between beats, pops on beats, and releases in silence.
         var music = LightEngine(fadeTime: 0.6, breathing: false)
         music.beatSync = true
