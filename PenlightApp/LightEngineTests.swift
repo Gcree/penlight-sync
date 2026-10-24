@@ -123,6 +123,90 @@ struct LightEngineTest {
         for _ in 0..<100 { _ = music.step(dt: 0.05) } // 5 s of silence
         expect(!music.musicDetected && music.step(dt: 0.05)! == white, "Silence must release beat sync to full brightness.")
 
+        // Blink style: lit right after each beat, dark for the rest of it, full again in silence.
+        var blink = LightEngine(fadeTime: 0.6, breathing: false)
+        blink.beatSync = true
+        blink.beatStyle = .blink
+        blink.setTarget(white)
+        var litAfterBeat = 255, darkLate = 0
+        for frameIndex in 0..<80 { // 4 s at 120 BPM
+            if frameIndex % 10 == 0 { blink.beat(strength: 0.5, bpm: 120) }
+            let frame = blink.step(dt: 0.05)!
+            guard frameIndex >= 40 else { continue }
+            if frameIndex % 10 < 4 { litAfterBeat = min(litAfterBeat, Int(frame.red)) }
+            if frameIndex % 10 >= 6 { darkLate = max(darkLate, Int(frame.red)) }
+        }
+        expect(litAfterBeat == 200, "Blink must light fully on the beat: \(litAfterBeat)")
+        expect(darkLate <= 10, "Blink must go dark between beats: \(darkLate)")
+        for _ in 0..<100 { _ = blink.step(dt: 0.05) }
+        expect(blink.step(dt: 0.05)! == white, "Silence must bring a blinking lamp back to full.")
+
+        // Color style: beats step through screen color, similar, screen color, opposite; silence restores it.
+        var stepping = LightEngine(fadeTime: 0, breathing: false)
+        stepping.beatSync = true
+        stepping.beatStyle = .colors
+        stepping.setTarget(red)
+        var onBeats: [ScreenRGB] = []
+        for frameIndex in 0..<80 {
+            if frameIndex % 10 == 0 { stepping.beat(strength: 1) }
+            let frame = stepping.step(dt: 0.05)!
+            if frameIndex % 10 == 5 { onBeats.append(frame) }
+        }
+        let orange = ScreenRGB(red: 255, green: 128, blue: 0), cyan = ScreenRGB(red: 0, green: 255, blue: 255)
+        expect(onBeats == [red, orange, red, cyan, red, orange, red, cyan], "Colors must cycle per beat: \(onBeats)")
+        for _ in 0..<50 { _ = stepping.step(dt: 0.05) }
+        expect(stepping.step(dt: 0.05)! == red, "Silence must return to the screen color.")
+        stepping.beat(strength: 1)
+        expect(stepping.step(dt: 0.05)! == red, "Music after a pause must start again from the screen color.")
+        expect(LightEngine.rotateHue([90, 90, 90], degrees: 180) == [90, 90, 90], "Grays have no hue to turn.")
+        expect(LightEngine.rotateHue([200, 50, 50], degrees: 360) == [200, 50, 50], "A full turn must keep the color.")
+
+        // Auto style: tempo picks blink, colors or breathe, and holds its pick near the lines.
+        expect(LightEngine.autoStyle(tempo: 150, current: .flash) == .blink, "Fast songs must blink.")
+        expect(LightEngine.autoStyle(tempo: 110, current: .flash) == .colors, "Mid-tempo songs must step colors.")
+        expect(LightEngine.autoStyle(tempo: 70, current: .flash) == .breathe, "Slow songs must breathe.")
+        expect(LightEngine.autoStyle(tempo: 128, current: .blink) == .blink, "Blink must hold just under the fast line.")
+        expect(LightEngine.autoStyle(tempo: 132, current: .colors) == .colors, "Colors must hold just over the fast line.")
+        expect(LightEngine.autoStyle(tempo: 88, current: .colors) == .colors, "Colors must hold just under the slow line.")
+        expect(LightEngine.autoStyle(tempo: 92, current: .breathe) == .breathe, "Breathe must hold just over the slow line.")
+        func autoRun(bpm: Double) -> (style: BeatStyle?, frames: [Int]) {
+            var engine = LightEngine(fadeTime: 0, breathing: false)
+            engine.beatSync = true
+            engine.beatStyle = .auto
+            engine.setTarget(white)
+            let interval = 60 / bpm
+            var nextBeat = 0.0, time = 0.0, frames: [Int] = []
+            for _ in 0..<160 { // 8 s
+                if time >= nextBeat - 1e-9 {
+                    engine.beat(strength: 1, bpm: bpm)
+                    nextBeat += interval
+                }
+                frames.append(Int(engine.step(dt: 0.05)!.red))
+                time += 0.05
+            }
+            return (engine.activeBeatStyle, Array(frames.suffix(80)))
+        }
+        let fastRun = autoRun(bpm: 150)
+        expect(fastRun.style == .blink && fastRun.frames.min()! <= 10, "Auto must blink a fast song: \(fastRun)")
+        let midRun = autoRun(bpm: 110)
+        expect(midRun.style == .colors && midRun.frames.allSatisfy { $0 == 200 }, "Auto must step colors at full brightness mid-tempo: \(midRun)")
+        let slowRun = autoRun(bpm: 60) // A beat every 20 frames; one breath every 40.
+        expect(slowRun.style == .breathe, "Auto must breathe a slow song: \(String(describing: slowRun.style))")
+        expect(slowRun.frames.max()! >= 195 && (95...110).contains(slowRun.frames.min()!),
+               "The slow-song breath must span full to about half: \(slowRun.frames)")
+        let steps = zip(slowRun.frames, slowRun.frames.dropFirst()).map { abs($0 - $1) }
+        expect(steps.max()! <= 15, "The slow-song breath must change smoothly: \(steps.max()!)")
+        var unknownTempo = LightEngine(fadeTime: 0, breathing: false)
+        unknownTempo.beatSync = true
+        unknownTempo.beatStyle = .auto
+        unknownTempo.setTarget(white)
+        for index in 0..<40 {
+            if index % 10 == 0 { unknownTempo.beat(strength: 1) }
+            _ = unknownTempo.step(dt: 0.05)
+        }
+        expect(unknownTempo.activeBeatStyle == .flash, "Auto must flash until a tempo is known.")
+        expect(BeatStyle.choices.map(\.name) == ["自動", "加亮", "亮滅", "換色"], "The apps offer auto first and hide breathe.")
+
         // Tempo: fast songs fade quicker than slow ones; the tempo is reported only while beats arrive.
         func fadeProgress(bpm: Double) -> Int {
             var engine = LightEngine(fadeTime: 0.6, breathing: false)

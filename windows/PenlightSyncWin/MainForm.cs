@@ -39,8 +39,9 @@ internal sealed class MainForm : Form
     private readonly ToggleSwitch _lowLatency = new("低延遲模式");
     private readonly ToggleSwitch _sceneCuts = new("換場快切");
     private readonly ToggleSwitch _breathing = new("呼吸律動");
-    private readonly ToggleSwitch _beatSync = new("跟音樂節拍閃動");
-    private readonly Label _beatSubtitle;
+    private readonly Label _beatStatus;
+    private readonly List<PillButton> _beatStyleChips = new();
+    private readonly Label _beatStyleSummary;
     private readonly RegionPreview _regionPreview = new() { Dock = DockStyle.Top };
     private readonly Label _regionLabel;
     private readonly PillButton _regionButton = new("框選範圍…") { Width = 120 };
@@ -85,7 +86,12 @@ internal sealed class MainForm : Form
         _screenHex = MakeLabel("—", secondary: true, size: 8.5f);
         _lampHex = MakeLabel("—", secondary: true, size: 8.5f);
         _error = new Label { AutoSize = true, MaximumSize = new Size(380, 0), Margin = Padding.Empty };
-        _beatSubtitle = MakeLabel("依 BPM 調整快慢", secondary: true, size: 8.5f);
+        _beatStatus = MakeLabel("", secondary: true, size: 8.5f);
+        _beatStatus.TextAlign = ContentAlignment.MiddleRight;
+        _beatStyleSummary = MakeLabel("", secondary: true, size: 8.5f);
+        _beatStyleSummary.Dock = DockStyle.Top;
+        _beatStyleSummary.Height = 24;
+        _beatStyleSummary.TextAlign = ContentAlignment.TopLeft;
         _regionLabel = MakeLabel("", secondary: false);
         _regionLabel.Dock = DockStyle.Top;
         _regionLabel.Height = 26;
@@ -203,13 +209,34 @@ internal sealed class MainForm : Form
             Gap(6), hint);
     }
 
-    private Panel BuildMotionPage() => Page(
-        LabeledRow("低延遲模式", MakeLabel("漸變最多 0.15 秒，燈光緊跟畫面", secondary: true, size: 8.5f), _lowLatency, 48),
-        Slider("漸變時間", _fade, 0.6, () => _controller.FadeTime, v => _controller.FadeTime = v),
-        Separator(),
-        LabeledRow("換場快切", MakeLabel("畫面大幅換色時加快漸變", secondary: true, size: 8.5f), _sceneCuts, 48),
-        LabeledRow("呼吸律動", MakeLabel("顏色穩定時亮度緩慢起伏", secondary: true, size: 8.5f), _breathing, 48),
-        LabeledRow("跟音樂節拍閃動", _beatSubtitle, _beatSync, 48));
+    private Panel BuildMotionPage()
+    {
+        // One row of chips: "關" turns beat sync off (Tag null), each style turns it on with that style.
+        var chips = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 38, WrapContents = false, Padding = Padding.Empty };
+        foreach (var style in BeatStyles.Choices.Cast<BeatStyle?>().Prepend(null))
+        {
+            var chip = new PillButton(style?.Name() ?? "關", ButtonKind.Chip) { Height = 30, Margin = new Padding(0, 2, 6, 2), Tag = style };
+            chip.Width = TextRenderer.MeasureText(chip.Text, Font).Width + 28;
+            chip.Click += (_, _) =>
+            {
+                if (style is { } chosen) _controller.BeatStyle = chosen;
+                _controller.BeatSync = style != null;
+                Render();
+            };
+            _beatStyleChips.Add(chip);
+            chips.Controls.Add(chip);
+        }
+
+        return Page(
+            LabeledRow("低延遲模式", MakeLabel("漸變最多 0.15 秒，燈光緊跟畫面", secondary: true, size: 8.5f), _lowLatency, 48),
+            Slider("漸變時間", _fade, 0.6, () => _controller.FadeTime, v => _controller.FadeTime = v),
+            Separator(),
+            LabeledRow("換場快切", MakeLabel("畫面大幅換色時加快漸變", secondary: true, size: 8.5f), _sceneCuts, 48),
+            LabeledRow("呼吸律動", MakeLabel("沒有音樂時，顏色穩定就緩慢起伏", secondary: true, size: 8.5f), _breathing, 48),
+            Separator(),
+            Columns(30, (MakeLabel("跟音樂節拍"), 0), (_beatStatus, 200)),
+            chips, _beatStyleSummary);
+    }
 
     private Panel BuildRegionPage()
     {
@@ -361,7 +388,6 @@ internal sealed class MainForm : Form
         };
         _sceneCuts.CheckedChanged += (_, _) => _controller.SceneCuts = _sceneCuts.Checked;
         _breathing.CheckedChanged += (_, _) => _controller.Breathing = _breathing.Checked;
-        _beatSync.CheckedChanged += (_, _) => _controller.BeatSync = _beatSync.Checked;
         _checkOnLaunch.CheckedChanged += (_, _) => _updates.CheckOnLaunch = _checkOnLaunch.Checked;
         _checkUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync(manual: true);
         _logButton.Click += (_, _) =>
@@ -524,10 +550,15 @@ internal sealed class MainForm : Form
         _lowLatency.Checked = _controller.LowLatency;
         _sceneCuts.Checked = _controller.SceneCuts;
         _breathing.Checked = _controller.Breathing;
-        _beatSync.Checked = _controller.BeatSync;
         _checkOnLaunch.Checked = _updates.CheckOnLaunch;
-        _beatSubtitle.Text = _controller.MusicDetected ? (_controller.Bpm is { } bpm ? $"偵測到 {bpm} BPM" : "偵測到節拍") : "依 BPM 調整快慢";
-        _beatSubtitle.ForeColor = _controller.MusicDetected ? Theme.Success : Theme.SecondaryText;
+        _beatStatus.Text = !_controller.BeatSync ? ""
+            : !_controller.MusicDetected ? "等待音樂…"
+            : (_controller.Bpm is { } bpm ? $"偵測到 {bpm} BPM" : "偵測到節拍")
+                + (_controller.BeatStyle == BeatStyle.Auto && _controller.ActiveBeatStyle is { } picked ? $"・{picked.Name()}" : "");
+        _beatStatus.ForeColor = _controller.MusicDetected ? Theme.Success : Theme.SecondaryText;
+        foreach (var chip in _beatStyleChips)
+            chip.Selected = chip.Tag is BeatStyle style ? _controller.BeatSync && style == _controller.BeatStyle : !_controller.BeatSync;
+        _beatStyleSummary.Text = _controller.BeatSync ? _controller.BeatStyle.Summary() : "只跟畫面顏色，不聽音樂";
 
         _regionPreview.Area = _controller.Region;
         _regionLabel.Text = _controller.Region is { } region ? $"目前：框選範圍（寬 {region.Width * 100:0}%、高 {region.Height * 100:0}%）" : "目前：整個主螢幕";

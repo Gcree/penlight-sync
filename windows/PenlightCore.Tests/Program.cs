@@ -180,6 +180,88 @@ Check(lowest <= 130, $"between beats the lamp rests dimmer ({lowest})");
 for (var i = 0; i < 100; i++) music.Step(0.05);
 Check(!music.MusicDetected && music.Step(0.05) == white, "silence releases beat sync");
 
+// Blink style: lit right after each beat, dark for the rest of it, full again in silence.
+var blink = new LightEngine(0.6, breathing: false) { BeatSync = true, BeatStyle = BeatStyle.Blink };
+blink.SetTarget(white);
+int litAfterBeat = 255, darkLate = 0;
+for (var frameIndex = 0; frameIndex < 80; frameIndex++)
+{
+    if (frameIndex % 10 == 0) blink.Beat(0.5, 120);
+    var frame = blink.Step(0.05)!.Value;
+    if (frameIndex < 40) continue;
+    if (frameIndex % 10 < 4) litAfterBeat = Math.Min(litAfterBeat, frame.Red);
+    if (frameIndex % 10 >= 6) darkLate = Math.Max(darkLate, frame.Red);
+}
+Check(litAfterBeat == 200, $"blink lights fully on the beat ({litAfterBeat})");
+Check(darkLate <= 10, $"blink goes dark between beats ({darkLate})");
+for (var i = 0; i < 100; i++) blink.Step(0.05);
+Check(blink.Step(0.05) == white, "silence brings a blinking lamp back to full");
+
+// Color style: beats step through screen color, similar, screen color, opposite; silence restores it.
+var stepping = new LightEngine(0, breathing: false) { BeatSync = true, BeatStyle = BeatStyle.Colors };
+stepping.SetTarget(red);
+var onBeats = new List<Rgb>();
+for (var frameIndex = 0; frameIndex < 80; frameIndex++)
+{
+    if (frameIndex % 10 == 0) stepping.Beat(1);
+    var frame = stepping.Step(0.05)!.Value;
+    if (frameIndex % 10 == 5) onBeats.Add(frame);
+}
+var orange = new Rgb(255, 128, 0);
+var cyan = new Rgb(0, 255, 255);
+Check(onBeats.SequenceEqual(new[] { red, orange, red, cyan, red, orange, red, cyan }), $"colors cycle per beat ({string.Join(" ", onBeats)})");
+for (var i = 0; i < 50; i++) stepping.Step(0.05);
+Check(stepping.Step(0.05) == red, "silence returns to the screen color");
+stepping.Beat(1);
+Check(stepping.Step(0.05) == red, "music after a pause starts again from the screen color");
+Check(LightEngine.RotateHue(new double[] { 90, 90, 90 }, 180).SequenceEqual(new double[] { 90, 90, 90 }), "grays have no hue to turn");
+Check(LightEngine.RotateHue(new double[] { 200, 50, 50 }, 360).SequenceEqual(new double[] { 200, 50, 50 }), "a full turn keeps the color");
+Check(BeatStyles.Choices.Select(s => s.Name()).SequenceEqual(new[] { "自動", "加亮", "亮滅", "換色" }), "beat styles match the Mac app");
+
+// Auto style: tempo picks blink, colors or breathe, and holds its pick near the lines.
+Check(LightEngine.AutoStyleFor(150, BeatStyle.Flash) == BeatStyle.Blink, "fast songs blink");
+Check(LightEngine.AutoStyleFor(110, BeatStyle.Flash) == BeatStyle.Colors, "mid-tempo songs step colors");
+Check(LightEngine.AutoStyleFor(70, BeatStyle.Flash) == BeatStyle.Breathe, "slow songs breathe");
+Check(LightEngine.AutoStyleFor(128, BeatStyle.Blink) == BeatStyle.Blink, "blink holds just under the fast line");
+Check(LightEngine.AutoStyleFor(132, BeatStyle.Colors) == BeatStyle.Colors, "colors hold just over the fast line");
+Check(LightEngine.AutoStyleFor(88, BeatStyle.Colors) == BeatStyle.Colors, "colors hold just under the slow line");
+Check(LightEngine.AutoStyleFor(92, BeatStyle.Breathe) == BeatStyle.Breathe, "breathe holds just over the slow line");
+(BeatStyle? Style, List<int> Frames) AutoRun(double bpm)
+{
+    var engine = new LightEngine(0, breathing: false) { BeatSync = true, BeatStyle = BeatStyle.Auto };
+    engine.SetTarget(white);
+    var interval = 60 / bpm;
+    double nextBeat = 0, time = 0;
+    var frames = new List<int>();
+    for (var i = 0; i < 160; i++)
+    {
+        if (time >= nextBeat - 1e-9)
+        {
+            engine.Beat(1, bpm);
+            nextBeat += interval;
+        }
+        frames.Add(engine.Step(0.05)!.Value.Red);
+        time += 0.05;
+    }
+    return (engine.ActiveBeatStyle, frames.Skip(80).ToList());
+}
+var fastRun = AutoRun(150);
+Check(fastRun.Style == BeatStyle.Blink && fastRun.Frames.Min() <= 10, $"auto blinks a fast song ({fastRun.Style}, min {fastRun.Frames.Min()})");
+var midRun = AutoRun(110);
+Check(midRun.Style == BeatStyle.Colors && midRun.Frames.All(f => f == 200), $"auto steps colors at full brightness mid-tempo ({midRun.Style})");
+var slowRun = AutoRun(60);
+Check(slowRun.Style == BeatStyle.Breathe, $"auto breathes a slow song ({slowRun.Style})");
+Check(slowRun.Frames.Max() >= 195 && slowRun.Frames.Min() is >= 95 and <= 110, $"slow-song breath spans full to about half ({slowRun.Frames.Min()}–{slowRun.Frames.Max()})");
+Check(slowRun.Frames.Zip(slowRun.Frames.Skip(1), (a, b) => Math.Abs(a - b)).Max() <= 15, "slow-song breath changes smoothly");
+var unknownTempo = new LightEngine(0, breathing: false) { BeatSync = true, BeatStyle = BeatStyle.Auto };
+unknownTempo.SetTarget(white);
+for (var i = 0; i < 40; i++)
+{
+    if (i % 10 == 0) unknownTempo.Beat(1);
+    unknownTempo.Step(0.05);
+}
+Check(unknownTempo.ActiveBeatStyle == BeatStyle.Flash, "auto flashes until a tempo is known");
+
 // Beat detector: 120 BPM kicks, silence, steady tone.
 const double rate = 48_000;
 var random = new Random(7);

@@ -13,6 +13,7 @@ private let warmthKey = "warmth"
 private let brightnessKey = "brightness"
 private let sceneCutsKey = "sceneCuts"
 private let beatSyncKey = "beatSync"
+private let beatStyleKey = "beatStyle"
 private let captureRegionKey = "captureRegion"
 private let lowLatencyKey = "lowLatency"
 
@@ -117,6 +118,12 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             beatSync ? startAudio() : stopAudio()
         }
     }
+    @Published var beatStyle: BeatStyle {
+        didSet {
+            engine.beatStyle = beatStyle
+            UserDefaults.standard.set(beatStyle.rawValue, forKey: beatStyleKey)
+        }
+    }
     /// Area of the main display to sample (normalized 0–1, top-left origin); nil samples the whole display.
     /// Applies from the next sample, also while syncing.
     @Published var captureRegion: CGRect? {
@@ -131,6 +138,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published private(set) var musicDetected = false
     /// The music's tempo (rounded BPM) while beat sync is shaping the light.
     @Published private(set) var bpm: Int?
+    /// The style shaping the light right now (what auto picked) while beat sync is shaping the light.
+    @Published private(set) var activeBeatStyle: BeatStyle?
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var screenColor: ScreenRGB?
     @Published private(set) var lampColor: ScreenRGB?
@@ -173,6 +182,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         brightness = defaults.object(forKey: brightnessKey) as? Double ?? 1
         sceneCuts = defaults.object(forKey: sceneCutsKey) as? Bool ?? true
         beatSync = defaults.bool(forKey: beatSyncKey)
+        beatStyle = defaults.string(forKey: beatStyleKey).flatMap(BeatStyle.init(rawValue:)) ?? .flash
         lowLatency = defaults.bool(forKey: lowLatencyKey)
         if let stored = defaults.array(forKey: captureRegionKey) as? [Double], stored.count == 4 {
             captureRegion = CGRect(x: stored[0], y: stored[1], width: stored[2], height: stored[3])
@@ -214,6 +224,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         sceneCuts = true
         breathing = false
         beatSync = false
+        beatStyle = .flash
     }
 
     // MARK: - Actions
@@ -500,6 +511,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         if engine.musicDetected != musicDetected { musicDetected = engine.musicDetected }
         let roundedBPM = engine.bpm.map { Int($0.rounded()) }
         if roundedBPM != bpm { bpm = roundedBPM }
+        if engine.activeBeatStyle != activeBeatStyle { activeBeatStyle = engine.activeBeatStyle }
         guard let frame,
               writeStartedAt == nil,
               frame != lampColor,
@@ -673,6 +685,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         audioMonitor = nil
         musicDetected = false
         bpm = nil
+        activeBeatStyle = nil
     }
 
     /// Beat sync is an extra; losing audio keeps the color sync running and reports why.
@@ -681,6 +694,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         audioMonitor = nil
         musicDetected = false
         bpm = nil
+        activeBeatStyle = nil
         errorMessage = "無法擷取系統音訊，節拍同步暫停（顏色連動照常）：\(error.localizedDescription)"
         log("節拍偵測失敗：\(error.localizedDescription)")
     }
@@ -707,6 +721,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         engine.brightness = brightness
         engine.sceneCuts = sceneCuts
         engine.beatSync = beatSync
+        engine.beatStyle = beatStyle
         return engine
     }
 

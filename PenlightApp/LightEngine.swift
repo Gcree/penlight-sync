@@ -1,5 +1,42 @@
 import Foundation
 
+/// How the lamp marks each music beat.
+enum BeatStyle: String, CaseIterable, Identifiable {
+    /// Picks by tempo: blink for fast songs, colors for mid-tempo ones, breathe for slow ones.
+    case auto
+    /// Dims slightly between beats and pops back to full on each beat.
+    case flash
+    /// Lit on the beat, dark between beats, like a concert crowd's light sea.
+    case blink
+    /// Each beat steps through the screen color, a similar color, the screen color again and its opposite color.
+    case colors
+    /// Brightness rises and falls once every two beats; only chosen by `auto` for slow songs.
+    case breathe
+
+    /// The styles offered in the apps.
+    static let choices: [BeatStyle] = [.auto, .flash, .blink, .colors]
+
+    var id: String { rawValue }
+    var name: String {
+        switch self {
+        case .auto: return "自動"
+        case .flash: return "加亮"
+        case .blink: return "亮滅"
+        case .colors: return "換色"
+        case .breathe: return "呼吸"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .auto: return "依 BPM 切換：快歌亮滅、中速換色、慢歌跟拍呼吸"
+        case .flash: return "拍點瞬間變亮，拍間稍暗"
+        case .blink: return "拍上亮、拍間暗，像演唱會燈海"
+        case .colors: return "每拍輪流：原色、相似色、原色、對比色"
+        case .breathe: return "跟著拍子緩慢起伏，每兩拍一次"
+        }
+    }
+}
+
 /// Turns sparse screen samples (and optional music beats) into a smooth lamp color stream:
 /// - each sample is graded (vibrance boost, color temperature, brightness floor, overall brightness) so averaged
 ///   video colors don't look muddy;
@@ -8,7 +45,9 @@ import Foundation
 /// - optional beat sync dims the lamp slightly between beats and pops it back up on each beat,
 ///   but only while beats keep arriving, so silence leaves the lamp at full brightness;
 ///   with a known tempo, fades speed up for fast songs (and slow down for slow ones) and each flash
-///   lasts about a third of a beat.
+///   lasts about a third of a beat;
+/// - the beat style can instead blink the lamp off between beats, step the hue on each beat, breathe with the beat,
+///   or pick one of these by tempo.
 struct LightEngine {
     static let breathPeriod: TimeInterval = 4
     /// Brightness dips to 70% at the bottom of each breath.
@@ -28,6 +67,18 @@ struct LightEngine {
     /// Beat sync engages while beats arrived within this window and releases after it.
     static let beatHold: TimeInterval = 2
     static let beatRamp: TimeInterval = 0.5
+    /// Blinking keeps the lamp lit for this share of a beat, then goes dark until the next one.
+    static let blinkDuty = 0.5
+    static let blinkOnTime: TimeInterval = 0.25
+    /// Hue offsets in degrees for successive beats in the color style: screen color, similar, screen color, opposite.
+    static let beatHues = [0.0, 30, 0, 180]
+    /// Auto style: blink from `autoFastTempo` BPM up, breathe below `autoSlowTempo`, colors in between.
+    /// A song must cross a line by `autoMargin` BPM to leave its current style, so tempo jitter cannot flip it.
+    static let autoFastTempo = 130.0
+    static let autoSlowTempo = 90.0
+    static let autoMargin = 4.0
+    /// The tempo breath dims to 50% halfway between every second beat.
+    static let beatBreathDepth = 0.5
     /// Tempo at which the fade time is used as set; faster songs scale it down, slower ones up, within `tempoScaleRange`.
     static let referenceTempo = 120.0
     static let tempoScaleRange = 0.6...1.4
@@ -45,6 +96,7 @@ struct LightEngine {
     var brightness: Double = 1
     var sceneCuts = true
     var beatSync = false
+    var beatStyle = BeatStyle.flash
 
     private var target: [Double]?
     private var current: [Double] = [0, 0, 0]
@@ -55,6 +107,8 @@ struct LightEngine {
     private var beatActivity = 0.0
     private var sinceBeat = TimeInterval.infinity
     private var tempo: Double?
+    private var beatCount = 0
+    private var autoStyle = BeatStyle.flash
 
     init(fadeTime: TimeInterval, breathing: Bool) {
         self.fadeTime = fadeTime
@@ -66,6 +120,18 @@ struct LightEngine {
 
     /// The music's tempo while beat sync is active and a tempo is known.
     var bpm: Double? { musicDetected ? tempo : nil }
+
+    /// The style shaping the light right now (what `auto` picked), while beat sync is active.
+    var activeBeatStyle: BeatStyle? { musicDetected ? resolvedStyle : nil }
+
+    private var resolvedStyle: BeatStyle { beatStyle == .auto ? autoStyle : beatStyle }
+
+    /// The style `auto` uses at `tempo`, staying with `current` until the tempo clearly leaves its range.
+    static func autoStyle(tempo: Double, current: BeatStyle) -> BeatStyle {
+        let fastLine = autoFastTempo + (current == .blink ? -autoMargin : current == .colors ? autoMargin : 0)
+        let slowLine = autoSlowTempo + (current == .breathe ? autoMargin : current == .colors ? -autoMargin : 0)
+        return tempo >= fastLine ? .blink : tempo < slowLine ? .breathe : .colors
+    }
 
     mutating func setTarget(_ rgb: ScreenRGB) {
         let next = Self.grade(rgb, vibrance: vibrance, minBrightness: minBrightness, warmth: warmth, brightness: brightness)
@@ -80,6 +146,8 @@ struct LightEngine {
     /// Registers a detected beat with strength 0–1 and, when known, the music's tempo in BPM.
     mutating func beat(strength: Double, bpm: Double? = nil) {
         pulse = max(pulse, min(1, max(0, strength)))
+        // After a pause the color steps start over from the screen color.
+        beatCount = sinceBeat < Self.beatHold ? beatCount + 1 : 0
         sinceBeat = 0
         if let bpm, bpm > 0 { tempo = bpm }
     }
@@ -105,8 +173,25 @@ struct LightEngine {
         if sinceBeat >= Self.beatHold { tempo = nil }
         let beatsArriving = beatSync && sinceBeat < Self.beatHold ? 1.0 : 0.0
         beatActivity += (beatsArriving - beatActivity) * (1 - exp(-dt / Self.beatRamp))
-        // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
-        let beatScale = 1 - Self.beatDepth * beatActivity * (1 - pulse)
+        if let tempo { autoStyle = Self.autoStyle(tempo: tempo, current: autoStyle) }
+        let beatScale: Double
+        switch resolvedStyle {
+        case .flash, .auto: // Auto falls back to flash until a tempo is known.
+            // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
+            beatScale = 1 - Self.beatDepth * beatActivity * (1 - pulse)
+        case .blink:
+            let onTime = tempo.map { Self.blinkDuty * 60 / $0 } ?? Self.blinkOnTime
+            beatScale = sinceBeat < onTime ? 1 : 1 - beatActivity
+        case .colors:
+            beatScale = 1 // The hue step itself marks the beat.
+        case .breathe:
+            // Brightest on every second beat, dimmest halfway to the next one.
+            let interval = tempo.map { 60 / $0 } ?? 0.75
+            let breath = min(1, (Double(beatCount % 2) + min(1, sinceBeat / interval)) / 2)
+            beatScale = 1 - Self.beatBreathDepth * beatActivity * (0.5 - 0.5 * cos(2 * Double.pi * breath))
+        }
+        let hueShift = resolvedStyle == .colors && beatSync && sinceBeat < Self.beatHold
+            ? Self.beatHues[beatCount % Self.beatHues.count] : 0
         let decay = tempo.map { min(0.3, max(0.1, 0.35 * 60 / $0)) } ?? Self.beatDecay
         pulse *= exp(-dt / decay)
 
@@ -117,7 +202,7 @@ struct LightEngine {
         let breathScale = 1 - Self.breathDepth * breathLevel * (0.5 - 0.5 * cos(2 * Double.pi * phase))
 
         let scale = beatScale * breathScale
-        let channels = current.map { UInt8(max(0, min(255, ($0 * scale).rounded()))) }
+        let channels = Self.rotateHue(current, degrees: hueShift).map { UInt8(max(0, min(255, ($0 * scale).rounded()))) }
         return ScreenRGB(red: channels[0], green: channels[1], blue: channels[2])
     }
 
@@ -147,6 +232,28 @@ struct LightEngine {
         }
         let level = min(1, max(0, brightness))
         return channels.map { $0 * level }
+    }
+
+    /// Turns the hue by `degrees`, keeping saturation and brightness; grays stay as they are.
+    static func rotateHue(_ rgb: [Double], degrees: Double) -> [Double] {
+        let maximum = rgb.max()!, minimum = rgb.min()!
+        let chroma = maximum - minimum
+        guard chroma > 0, degrees.truncatingRemainder(dividingBy: 360) != 0 else { return rgb }
+        let (r, g, b) = (rgb[0], rgb[1], rgb[2])
+        var hue: Double
+        if maximum == r { hue = (g - b) / chroma } else if maximum == g { hue = (b - r) / chroma + 2 } else { hue = (r - g) / chroma + 4 }
+        hue = ((hue * 60 + degrees).truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360) / 60
+        let x = chroma * (1 - abs(hue.truncatingRemainder(dividingBy: 2) - 1))
+        let sector: [Double]
+        switch Int(hue) {
+        case 0: sector = [chroma, x, 0]
+        case 1: sector = [x, chroma, 0]
+        case 2: sector = [0, chroma, x]
+        case 3: sector = [0, x, chroma]
+        case 4: sector = [x, 0, chroma]
+        default: sector = [chroma, 0, x]
+        }
+        return sector.map { $0 + minimum }
     }
 
     private static func distance(_ a: [Double], _ b: [Double]) -> Double {

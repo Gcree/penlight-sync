@@ -98,11 +98,51 @@ public static class AverageColor
     }
 }
 
+/// <summary>Port of BeatStyle in LightEngine.swift: how the lamp marks each music beat.</summary>
+public enum BeatStyle
+{
+    /// <summary>Picks by tempo: blink for fast songs, colors for mid-tempo ones, breathe for slow ones.</summary>
+    Auto,
+    /// <summary>Dims slightly between beats and pops back to full on each beat.</summary>
+    Flash,
+    /// <summary>Lit on the beat, dark between beats, like a concert crowd's light sea.</summary>
+    Blink,
+    /// <summary>Each beat steps through the screen color, a similar color, the screen color again and its opposite color.</summary>
+    Colors,
+    /// <summary>Brightness rises and falls once every two beats; only chosen by <see cref="Auto"/> for slow songs.</summary>
+    Breathe,
+}
+
+public static class BeatStyles
+{
+    /// <summary>The styles offered in the apps.</summary>
+    public static readonly IReadOnlyList<BeatStyle> Choices = new[] { BeatStyle.Auto, BeatStyle.Flash, BeatStyle.Blink, BeatStyle.Colors };
+
+    public static string Name(this BeatStyle style) => style switch
+    {
+        BeatStyle.Auto => "自動",
+        BeatStyle.Breathe => "呼吸",
+        BeatStyle.Blink => "亮滅",
+        BeatStyle.Colors => "換色",
+        _ => "加亮",
+    };
+
+    public static string Summary(this BeatStyle style) => style switch
+    {
+        BeatStyle.Auto => "依 BPM 切換：快歌亮滅、中速換色、慢歌跟拍呼吸",
+        BeatStyle.Breathe => "跟著拍子緩慢起伏，每兩拍一次",
+        BeatStyle.Blink => "拍上亮、拍間暗，像演唱會燈海",
+        BeatStyle.Colors => "每拍輪流：原色、相似色、原色、對比色",
+        _ => "拍點瞬間變亮，拍間稍暗",
+    };
+}
+
 /// <summary>
 /// Port of LightEngine.swift: grades each sample (vibrance, color temperature, brightness floor, overall brightness), fades toward it (faster after a
 /// scene cut), adds an optional breath while the color is steady, and optional beat sync that dims between
 /// beats and pops on each beat only while beats keep arriving. With a known tempo, fades speed up for fast songs
-/// (and slow down for slow ones) and each flash lasts about a third of a beat.
+/// (and slow down for slow ones) and each flash lasts about a third of a beat. The beat style can instead blink the
+/// lamp off between beats, step the hue on each beat, breathe with the beat, or pick one of these by tempo.
 /// </summary>
 public sealed class LightEngine
 {
@@ -122,6 +162,20 @@ public sealed class LightEngine
     public const double BeatDecay = 0.18;
     public const double BeatHold = 2;
     public const double BeatRamp = 0.5;
+    /// <summary>Blinking keeps the lamp lit for this share of a beat, then goes dark until the next one.</summary>
+    public const double BlinkDuty = 0.5;
+    public const double BlinkOnTime = 0.25;
+    /// <summary>Hue offsets in degrees for successive beats in the color style: screen color, similar, screen color, opposite.</summary>
+    private static readonly double[] BeatHues = { 0, 30, 0, 180 };
+    /// <summary>
+    /// Auto style: blink from <see cref="AutoFastTempo"/> BPM up, breathe below <see cref="AutoSlowTempo"/>, colors in between.
+    /// A song must cross a line by <see cref="AutoMargin"/> BPM to leave its current style, so tempo jitter cannot flip it.
+    /// </summary>
+    public const double AutoFastTempo = 130;
+    public const double AutoSlowTempo = 90;
+    public const double AutoMargin = 4;
+    /// <summary>The tempo breath dims to 50% halfway between every second beat.</summary>
+    public const double BeatBreathDepth = 0.5;
     /// <summary>Tempo at which the fade time is used as set; faster songs scale it down, slower ones up.</summary>
     public const double ReferenceTempo = 120;
     public const double MinTempoScale = 0.6;
@@ -136,6 +190,8 @@ public sealed class LightEngine
     private double _beatActivity;
     private double _sinceBeat = double.PositiveInfinity;
     private double? _tempo;
+    private int _beatCount;
+    private BeatStyle _autoStyle = BeatStyle.Flash;
 
     public LightEngine(double fadeTime, bool breathing)
     {
@@ -156,12 +212,26 @@ public sealed class LightEngine
     public double Brightness { get; set; } = 1;
     public bool SceneCuts { get; set; } = true;
     public bool BeatSync { get; set; }
+    public BeatStyle BeatStyle { get; set; } = BeatStyle.Flash;
 
     /// <summary>True while beat sync is actively shaping the light.</summary>
     public bool MusicDetected => BeatSync && _beatActivity > 0.5;
 
     /// <summary>The music's tempo while beat sync is active and a tempo is known.</summary>
     public double? Bpm => MusicDetected ? _tempo : null;
+
+    /// <summary>The style shaping the light right now (what Auto picked), while beat sync is active.</summary>
+    public BeatStyle? ActiveBeatStyle => MusicDetected ? ResolvedStyle : null;
+
+    private BeatStyle ResolvedStyle => BeatStyle == BeatStyle.Auto ? _autoStyle : BeatStyle;
+
+    /// <summary>The style Auto uses at <paramref name="tempo"/>, staying with <paramref name="current"/> until the tempo clearly leaves its range.</summary>
+    public static BeatStyle AutoStyleFor(double tempo, BeatStyle current)
+    {
+        var fastLine = AutoFastTempo + (current == BeatStyle.Blink ? -AutoMargin : current == BeatStyle.Colors ? AutoMargin : 0);
+        var slowLine = AutoSlowTempo + (current == BeatStyle.Breathe ? AutoMargin : current == BeatStyle.Colors ? -AutoMargin : 0);
+        return tempo >= fastLine ? BeatStyle.Blink : tempo < slowLine ? BeatStyle.Breathe : BeatStyle.Colors;
+    }
 
     public void SetTarget(Rgb rgb)
     {
@@ -175,6 +245,8 @@ public sealed class LightEngine
     public void Beat(double strength, double? bpm = null)
     {
         _pulse = Math.Max(_pulse, Math.Clamp(strength, 0, 1));
+        // After a pause the color steps start over from the screen color.
+        _beatCount = _sinceBeat < BeatHold ? _beatCount + 1 : 0;
         _sinceBeat = 0;
         if (bpm is > 0) _tempo = bpm;
     }
@@ -197,8 +269,19 @@ public sealed class LightEngine
         if (_sinceBeat >= BeatHold) _tempo = null;
         var beatsArriving = BeatSync && _sinceBeat < BeatHold ? 1.0 : 0.0;
         _beatActivity += (beatsArriving - _beatActivity) * (1 - Math.Exp(-dt / BeatRamp));
-        // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
-        var beatScale = 1 - BeatDepth * _beatActivity * (1 - _pulse);
+        if (_tempo is { } styleTempo) _autoStyle = AutoStyleFor(styleTempo, _autoStyle);
+        var beatScale = ResolvedStyle switch
+        {
+            BeatStyle.Blink => _sinceBeat < (_tempo is { } blinkTempo ? BlinkDuty * 60 / blinkTempo : BlinkOnTime) ? 1 : 1 - _beatActivity,
+            BeatStyle.Colors => 1, // The hue step itself marks the beat.
+            // Brightest on every second beat, dimmest halfway to the next one.
+            BeatStyle.Breathe => 1 - BeatBreathDepth * _beatActivity * (0.5 - 0.5 * Math.Cos(2 * Math.PI * Math.Min(1,
+                (_beatCount % 2 + Math.Min(1, _sinceBeat / (_tempo is { } breathTempo ? 60 / breathTempo : 0.75))) / 2))),
+            // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
+            // Auto falls back to flash until a tempo is known.
+            _ => 1 - BeatDepth * _beatActivity * (1 - _pulse),
+        };
+        var hueShift = ResolvedStyle == BeatStyle.Colors && BeatSync && _sinceBeat < BeatHold ? BeatHues[_beatCount % BeatHues.Length] : 0;
         var decay = _tempo is { } beatTempo ? Math.Clamp(0.35 * 60 / beatTempo, 0.1, 0.3) : BeatDecay;
         _pulse *= Math.Exp(-dt / decay);
 
@@ -209,7 +292,8 @@ public sealed class LightEngine
         var breathScale = 1 - BreathDepth * _breathLevel * (0.5 - 0.5 * Math.Cos(2 * Math.PI * _phase));
 
         var scale = beatScale * breathScale;
-        byte Channel(int i) => (byte)Math.Clamp(Math.Round(_current[i] * scale, MidpointRounding.AwayFromZero), 0, 255);
+        var shown = RotateHue(_current, hueShift);
+        byte Channel(int i) => (byte)Math.Clamp(Math.Round(shown[i] * scale, MidpointRounding.AwayFromZero), 0, 255);
         return new Rgb(Channel(0), Channel(1), Channel(2));
     }
 
@@ -246,6 +330,29 @@ public sealed class LightEngine
             channels = maximum > 0 ? channels.Select(c => c * floor / maximum).ToArray() : new[] { floor, floor, floor };
         var level = Math.Clamp(brightness, 0, 1);
         return channels.Select(c => c * level).ToArray();
+    }
+
+    /// <summary>Turns the hue by <paramref name="degrees"/>, keeping saturation and brightness; grays stay as they are.</summary>
+    public static double[] RotateHue(double[] rgb, double degrees)
+    {
+        var maximum = rgb.Max();
+        var minimum = rgb.Min();
+        var chroma = maximum - minimum;
+        if (chroma <= 0 || degrees % 360 == 0) return rgb;
+        double r = rgb[0], g = rgb[1], b = rgb[2];
+        var hue = maximum == r ? (g - b) / chroma : maximum == g ? (b - r) / chroma + 2 : (r - g) / chroma + 4;
+        hue = ((hue * 60 + degrees) % 360 + 360) % 360 / 60;
+        var x = chroma * (1 - Math.Abs(hue % 2 - 1));
+        double[] sector = (int)hue switch
+        {
+            0 => new[] { chroma, x, 0 },
+            1 => new[] { x, chroma, 0 },
+            2 => new[] { 0, chroma, x },
+            3 => new[] { 0, x, chroma },
+            4 => new[] { x, 0, chroma },
+            _ => new[] { chroma, 0, x },
+        };
+        return sector.Select(c => c + minimum).ToArray();
     }
 
     private static double Distance(double[] a, double[] b) =>

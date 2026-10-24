@@ -316,12 +316,39 @@ private struct MotionSettings: View {
             .disabled(controller.lowLatency)
             Divider()
             ToggleRow(title: "換場快切", subtitle: "畫面大幅換色時加快漸變", isOn: $controller.sceneCuts)
-            ToggleRow(title: "呼吸律動", subtitle: "顏色穩定時亮度緩慢起伏", isOn: $controller.breathing)
-            ToggleRow(title: "跟音樂節拍閃動",
-                      subtitle: controller.musicDetected ? (controller.bpm.map { "偵測到 \($0) BPM" } ?? "偵測到節拍") : "依 BPM 調整快慢",
-                      subtitleColor: controller.musicDetected ? Theme.success : Theme.secondaryText,
-                      isOn: $controller.beatSync)
+            ToggleRow(title: "呼吸律動", subtitle: "沒有音樂時，顏色穩定就緩慢起伏", isOn: $controller.breathing)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("跟音樂節拍")
+                    Spacer()
+                    Text(musicStatus)
+                        .font(.caption)
+                        .foregroundStyle(controller.musicDetected ? Theme.success : Theme.secondaryText)
+                }
+                HStack(spacing: 6) {
+                    PresetChip(name: "關", selected: !controller.beatSync) { controller.beatSync = false }
+                    ForEach(BeatStyle.choices) { style in
+                        PresetChip(name: style.name, selected: controller.beatSync && controller.beatStyle == style) {
+                            controller.beatStyle = style
+                            controller.beatSync = true
+                        }
+                    }
+                }
+                Text(controller.beatSync ? controller.beatStyle.summary : "只跟畫面顏色，不聽音樂")
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryText)
+            }
         }
+    }
+
+    /// Detected tempo, plus the style auto picked for it.
+    private var musicStatus: String {
+        guard controller.beatSync else { return "" }
+        guard controller.musicDetected else { return "等待音樂…" }
+        var text = controller.bpm.map { "偵測到 \($0) BPM" } ?? "偵測到節拍"
+        if controller.beatStyle == .auto, let active = controller.activeBeatStyle { text += "・\(active.name)" }
+        return text
     }
 }
 

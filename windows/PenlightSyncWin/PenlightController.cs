@@ -55,6 +55,7 @@ internal sealed class PenlightController : IDisposable
     private double _brightness = 1;
     private bool _sceneCuts = true;
     private bool _beatSync;
+    private BeatStyle _beatStyle = BeatStyle.Flash;
     private RectangleF? _region;
     private bool _lowLatency;
     private readonly LatencyMeter _captureLatency = new();
@@ -104,6 +105,7 @@ internal sealed class PenlightController : IDisposable
                         case "breathing": _breathing = parts[1] == "1"; break;
                         case "sceneCuts": _sceneCuts = parts[1] == "1"; break;
                         case "beatSync": _beatSync = parts[1] == "1"; break;
+                        case "beatStyle": _beatStyle = Enum.TryParse<BeatStyle>(parts[1], out var style) && Enum.IsDefined(style) ? style : BeatStyle.Flash; break;
                         case "lowLatency": _lowLatency = parts[1] == "1"; break;
                         case "region":
                             var values = parts[1].Split(',').Select(v => double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : -1).ToArray();
@@ -128,7 +130,7 @@ internal sealed class PenlightController : IDisposable
     private LightEngine MakeEngine() => new(EffectiveFadeTime, _breathing)
     {
         Vibrance = _vibrance, MinBrightness = _minBrightness, Warmth = _warmth, Brightness = _brightness,
-        SceneCuts = _sceneCuts, BeatSync = _beatSync,
+        SceneCuts = _sceneCuts, BeatSync = _beatSync, BeatStyle = _beatStyle,
     };
 
     public event Action? Changed;
@@ -146,6 +148,8 @@ internal sealed class PenlightController : IDisposable
     public bool MusicDetected { get; private set; }
     /// <summary>The music's tempo (rounded BPM) while beat sync is shaping the light.</summary>
     public int? Bpm { get; private set; }
+    /// <summary>The style shaping the light right now (what Auto picked) while beat sync is shaping the light.</summary>
+    public BeatStyle? ActiveBeatStyle { get; private set; }
     /// <summary>Recent average capture and Bluetooth round-trip times while syncing.</summary>
     public string? LatencySummary { get; private set; }
     public string LogPath => _logPath;
@@ -255,6 +259,7 @@ internal sealed class PenlightController : IDisposable
         SceneCuts = true;
         Breathing = false;
         BeatSync = false;
+        BeatStyle = BeatStyle.Flash;
         Notify();
     }
 
@@ -300,13 +305,25 @@ internal sealed class PenlightController : IDisposable
         }
     }
 
+    /// <summary>How the lamp marks each beat; applies right away.</summary>
+    public BeatStyle BeatStyle
+    {
+        get => _beatStyle;
+        set
+        {
+            _beatStyle = value;
+            _engine.BeatStyle = value;
+            SaveEffects();
+        }
+    }
+
     private void SaveEffects()
     {
         string Number(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string Flag(bool value) => value ? "1" : "0";
         var text = $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
             + $"minBrightness={Number(_minBrightness)}\nwarmth={Number(_warmth)}\nbrightness={Number(_brightness)}\n"
-            + $"sceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\n"
+            + $"sceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\nbeatStyle={_beatStyle}\n"
             + $"lowLatency={Flag(_lowLatency)}\n";
         if (_region is { } r) text += $"region={Number(r.X)},{Number(r.Y)},{Number(r.Width)},{Number(r.Height)}\n";
         try { File.WriteAllText(_effectsPath, text); } catch (IOException) { }
@@ -333,6 +350,7 @@ internal sealed class PenlightController : IDisposable
         _audio = null;
         MusicDetected = false;
         Bpm = null;
+        ActiveBeatStyle = null;
     }
 
     /// <summary>Audio problems only turn off the beat effect; color sync keeps running.</summary>
@@ -687,10 +705,11 @@ internal sealed class PenlightController : IDisposable
             var frame = _engine.Step((now - last).TotalSeconds);
             last = now;
             var bpm = _engine.Bpm is { } tempo ? (int)Math.Round(tempo) : (int?)null;
-            if (_engine.MusicDetected != MusicDetected || bpm != Bpm)
+            if (_engine.MusicDetected != MusicDetected || bpm != Bpm || _engine.ActiveBeatStyle != ActiveBeatStyle)
             {
                 MusicDetected = _engine.MusicDetected;
                 Bpm = bpm;
+                ActiveBeatStyle = _engine.ActiveBeatStyle;
                 Notify();
             }
             if (frame is { } color && color != LampColor)
