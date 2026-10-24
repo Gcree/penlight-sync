@@ -8,8 +8,8 @@ import time
 import unittest
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-SOURCES = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+SOURCES = pathlib.Path(__file__).resolve().parents[1]
 SYNTHETIC_UUID = "00000000-0000-0000-0000-000000000001"
 
 

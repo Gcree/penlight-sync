@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
-SOURCE = pathlib.Path(__file__).resolve().parent / '開始連動.command'
+SOURCE = pathlib.Path(__file__).resolve().parents[1] / '開始連動.command'
 
 
 class LauncherTests(unittest.TestCase):

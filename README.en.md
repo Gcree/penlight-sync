@@ -74,7 +74,7 @@ The launcher only connects to the lamp listed in `device-id.txt`. CoreBluetooth 
 ## What has been verified
 
 - Protocol: generated red/green/blue/off frames match captured packets; newly generated white/cyan/off frames were confirmed on the real lamp.
-- macOS CLI and macOS app: a full-screen red → green → blue → white → black test got a write acknowledgement for every color, and the user confirmed the physical lamp changed in order. Scan, sync, and stop were tested on hardware. See `驗證紀錄.md` (Chinese).
+- macOS CLI and macOS app: a full-screen red → green → blue → white → black test got a write acknowledgement for every color, and the user confirmed the physical lamp changed in order. Scan, sync, and stop were tested on hardware. See [`docs/dev/驗證紀錄.md`](docs/dev/驗證紀錄.md) (Chinese).
 - Windows app: the protocol encoder, average color, and light-effect logic (including beat detection) pass the same test cases as the Swift code. **It has not yet been run on a real Windows PC**, and its system-audio capture is untested.
 - The v1.2.0 additions (vibrance, minimum brightness, bar/subtitle skipping, scene cuts, beat sync) have only passed automated tests and **have not been verified on a real lamp yet**.
 - The v1.3.0 additions (capture area selection, auto-reconnect, BPM-adaptive speed) and the later continuous capture, low-latency mode, latency readout, and Windows 11 connection parameters have only passed automated tests and compilation and **have not been verified on a real lamp yet**.
@@ -99,7 +99,8 @@ The Windows app needs the .NET 8 SDK and can be cross-compiled on a Mac.
 - `PenlightApp/`: macOS SwiftUI window, controller, `LightEngine.swift` (vibrance, minimum brightness, fade, scene cuts, breathing, beats), `BeatDetector.swift` (beat detection), and `SystemAudioMonitor.swift` (system audio).
 - `windows/PenlightCore/`: C# port of the algorithms above; `windows/PenlightCore.Tests/` checks them with the same cases as Swift.
 - `windows/PenlightSyncWin/`: WinForms window, Windows Bluetooth (WinRT; asks for a shorter connection interval on Windows 11), screen capture (GDI StretchBlt straight to a thumbnail), and system-audio capture (WASAPI via the MIT-licensed NAudio).
-- `test_*.py`: build and run the Swift/C# self-tests, launcher tests, and CLI tests.
+- `tests/`: Swift self-tests, plus `test_*.py` that build and run the Swift/C# self-tests, launcher tests, and CLI tests. `test_analyze_pklg.py` in the root tests the packet parser `analyze_pklg.py`.
+- `docs/dev/`: development progress, hardware verification, and code review notes (Chinese).
 
 ## Protocol source
 
