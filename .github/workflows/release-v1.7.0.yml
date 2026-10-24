@@ -1,0 +1,117 @@
+name: Release v1.7.0
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.7.0]') }}
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Run test suite
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+      - name: Build universal macOS app
+        run: ./build_mac_app.sh
+      - name: Package macOS app and CLI
+        shell: bash
+        run: |
+          mkdir -p dist/package
+          cp -R dist/PenlightSync.app dist/package/
+          swiftc -parse-as-library ScreenColor.swift PenlightProtocol.swift PenlightSync.swift -o dist/package/PenlightSync
+          cp "開始連動.command" README.md README.en.md LICENSE NOTICE.md dist/package/
+          (cd dist/package && zip -r ../PenlightSync-macOS.zip .)
+      - name: Upload macOS release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: dist/PenlightSync-macOS.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  build-windows:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.7.0]') }}
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Run Windows core tests
+        run: dotnet run --project windows/PenlightCore.Tests -c Release
+      - name: Publish Windows x64 app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+          dotnet publish windows/PenlightSyncWin -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o dist/windows
+          Copy-Item README.md, README.en.md, LICENSE, NOTICE.md dist/windows/
+          Compress-Archive -Path dist/windows/* -DestinationPath dist/PenlightSync-Windows-x64.zip -Force
+      - name: Upload Windows release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/PenlightSync-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-release:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.7.0]') }}
+    needs:
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS asset
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-release
+          path: release-assets
+      - name: Download Windows asset
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: release-assets
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.7.0
+          target_commitish: ${{ github.sha }}
+          name: 'v1.7.0：跟音樂節拍與 BPM 自動燈光效果'
+          draft: false
+          prerelease: false
+          make_latest: true
+          body: |
+            ## 新增 / New
+
+            - **跟音樂節拍 / Music beat sync**：將節拍效果整合為「關／自動／加亮／亮滅／換色」（Off / Auto / Boost / Blink / Colors）。
+            - **BPM 自動切換 / BPM-based auto mode**：快歌（130 BPM 以上）亮滅、中速（90–130 BPM）換色、慢歌（90 BPM 以下）每兩拍呼吸；切換門檻有 4 BPM 緩衝，尚未估出 BPM 前先使用加亮。
+            - **節拍狀態 / Beat status**：顯示偵測到的 BPM 與自動模式選用的效果；音樂停止後回到畫面原色，播放音樂時暫停一般呼吸律動。
+            - **測試與文件整理 / Tests and docs**：新增 Swift/C# 對應測試，並整理測試與開發紀錄檔案。
+
+            ## 驗證狀態 / Verification
+
+            - 發布前會執行 macOS 自動測試與建置，並執行 Windows 核心測試與 x64 發布建置；測試或建置未通過時不會建立此 Release。
+            - Windows 版尚未在實體 Windows 電腦上完整驗證介面與系統聲音擷取。
+            - 本版音樂節拍功能尚未使用實體 Ado Light Stick 實測。
+          files: |
+            release-assets/PenlightSync-macOS.zip
+            release-assets/PenlightSync-Windows-x64.zip
