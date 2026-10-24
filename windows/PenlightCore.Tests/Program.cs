@@ -39,7 +39,7 @@ Check(AverageColor.Find(padded, 2, 2, 12) == new Rgb(240, 8, 10), "padded rows a
 Check(AverageColor.Find(new byte[] { 0, 0, 0, 255 }, 2, 1, 8) == null, "malformed buffer");
 Check(AverageColor.Find(new byte[] { 0, 0, 0, 0 }, 1, 1, 4) == null, "fully transparent buffer");
 
-// Video sampling: same cases as ScreenColorTests.swift.
+// Video sampling: same cases as tests/ScreenColorTests.swift.
 byte[] Frame(int width, int height, Rgb fill)
 {
     var bytes = new byte[width * height * 4];
@@ -70,7 +70,7 @@ var centered = Frame(9, 9, new Rgb(0, 0, 255));
 for (var y = 3; y < 6; y++) for (var x = 3; x < 6; x++) Set(centered, 9, x, y, new Rgb(255, 0, 0));
 Check(AverageColor.Find(centered, 9, 9, 36)!.Value.Red >= 255 * 9 / 81 + 5, "center pixels weigh more than corners");
 
-// LightEngine: same cases as LightEngineTests.swift.
+// LightEngine: same cases as tests/LightEngineTests.swift.
 var red = new Rgb(255, 0, 0);
 var blue = new Rgb(0, 0, 255);
 var engine = new LightEngine(0.6, breathing: false) { SceneCuts = false };
@@ -146,7 +146,7 @@ Check(Math.Abs(darkRed[0] - 51) < 0.01 && Math.Abs(darkRed[1] - 25.5) < 0.01, "f
 Check(LightEngine.Grade(black, 0, 0.2).SequenceEqual(new double[] { 51, 51, 51 }), "floor lights black as dim white");
 Check(LightEngine.Grade(new Rgb(200, 0, 0), 0, 0.2).SequenceEqual(new double[] { 200, 0, 0 }), "floor leaves bright colors");
 
-// Color temperature and overall brightness: same cases as LightEngineTests.swift.
+// Color temperature and overall brightness: same cases as tests/LightEngineTests.swift.
 var gray200 = new Rgb(200, 200, 200);
 Check(LightEngine.Grade(gray200, 0, 0, 0, 1).SequenceEqual(new double[] { 200, 200, 200 }), "neutral temperature and full brightness");
 var warm = LightEngine.Grade(gray200, 0, 0, warmth: 1);
@@ -325,7 +325,7 @@ Check(new BeatDetector(rate).Process(new float[(int)(rate * 2)]).Count == 0, "si
 var tone = Enumerable.Range(0, (int)(rate * 3)).Select(i => (float)(0.5 * Math.Sin(2 * Math.PI * 60 * i / rate))).ToArray();
 Check(new BeatDetector(rate).Process(tone).Count <= 1, "steady tone does not keep producing beats");
 
-// Release versions: same cases as UpdateCheckerTests.swift.
+// Release versions: same cases as tests/UpdateCheckerTests.swift.
 Check(ReleaseVersion.Parts("v1.4.0") is [1, 4, 0], "v-prefixed tag");
 Check(ReleaseVersion.Parts("1.10") is [1, 10], "plain version");
 Check(ReleaseVersion.Parts("v2.0.0-beta") is [2, 0, 0], "pre-release suffix is ignored");

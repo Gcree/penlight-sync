@@ -79,7 +79,7 @@ App 是自簽（未經 Apple 公證）。若被擋，請在 Finder 對 App 按�
 ## 已驗證的範圍
 
 - 協議：紅／綠／藍／熄滅指令與實際擷取封包一致；新生成的白／青／熄滅指令經實機確認。
-- Mac 命令列版與 Mac 視窗版：以全主螢幕紅→綠→藍→白→黑色塊實測，五色均取得手燈寫入回應，使用者確認手燈實體依序變色。掃描、連動、停止皆經實機驗證。詳見 `驗證紀錄.md`。
+- Mac 命令列版與 Mac 視窗版：以全主螢幕紅→綠→藍→白→黑色塊實測，五色均取得手燈寫入回應，使用者確認手燈實體依序變色。掃描、連動、停止皆經實機驗證。詳見 [`docs/dev/驗證紀錄.md`](docs/dev/驗證紀錄.md)。
 - Windows 版：加密指令、平均色與燈光效果（含節拍偵測）的核心邏輯以與 Mac 版相同的測試案例驗證；**尚未在實體 Windows 電腦上執行**，系統聲音擷取也尚未實測。
 - v1.2.0 新增的鮮豔度、最低亮度、黑邊／字幕略過、換場快切與節拍閃動只經過自動測試，**尚未用手燈實機驗證**。
 - v1.3.0 新增的框選取色範圍、斷線自動重連與依 BPM 調整快慢，以及之後的連續擷取、低延遲模式、延遲顯示與 Windows 11 藍牙連線參數，只經過自動測試與編譯，**尚未用手燈實機驗證**。
@@ -104,7 +104,8 @@ Windows 版需 .NET 8 SDK，可在 Mac 上直接交叉編譯。
 - `PenlightApp/`：Mac SwiftUI 視窗、控制邏輯、`LightEngine.swift`（鮮豔度、最低亮度、漸變、換場、呼吸、節拍）、`BeatDetector.swift`（節拍偵測）與 `SystemAudioMonitor.swift`（系統聲音）。
 - `windows/PenlightCore/`：上述演算法的 C# 移植；`windows/PenlightCore.Tests/` 用與 Swift 相同的案例檢查。
 - `windows/PenlightSyncWin/`：WinForms 視窗、Windows 藍牙（WinRT，Windows 11 會要求較短連線間隔）、螢幕擷取（GDI StretchBlt 直接縮圖）與系統聲音擷取（WASAPI，使用 MIT 授權的 NAudio）。
-- `test_*.py`：編譯並執行 Swift／C# 自我測試、啟動檔與命令列測試。
+- `tests/`：Swift 自我測試，以及編譯並執行 Swift／C# 自我測試、啟動檔與命令列測試的 `test_*.py`；根目錄的 `test_analyze_pklg.py` 測試封包解析器 `analyze_pklg.py`。
+- `docs/dev/`：開發進度、實機驗證與程式審查紀錄。
 
 ## 協議來源
 

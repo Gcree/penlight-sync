@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 
-SOURCES = pathlib.Path(__file__).resolve().parent
+SOURCES = pathlib.Path(__file__).resolve().parents[1]
 DOTNET = shutil.which("dotnet") or str(pathlib.Path.home() / ".dotnet" / "dotnet")
 
 
@@ -50,18 +50,18 @@ class MacAppTests(unittest.TestCase):
 
     def test_average_color(self):
         self.compile_and_run(
-            ["ScreenColor.swift", "ScreenColorTests.swift"], "ScreenColorSampler self-tests passed", parse_as_library=False
+            ["ScreenColor.swift", "tests/ScreenColorTests.swift"], "ScreenColorSampler self-tests passed", parse_as_library=False
         )
 
     def test_light_engine_effects_and_beat_detector(self):
         self.compile_and_run(
-            ["ScreenColor.swift", "PenlightApp/LightEngine.swift", "PenlightApp/BeatDetector.swift", "PenlightApp/LightEngineTests.swift"],
+            ["ScreenColor.swift", "PenlightApp/LightEngine.swift", "PenlightApp/BeatDetector.swift", "tests/LightEngineTests.swift"],
             "LightEngine self-tests passed",
         )
 
     def test_update_version_comparison(self):
         self.compile_and_run(
-            ["PenlightApp/UpdateChecker.swift", "PenlightApp/UpdateCheckerTests.swift"], "UpdateChecker self-tests passed"
+            ["PenlightApp/UpdateChecker.swift", "tests/UpdateCheckerTests.swift"], "UpdateChecker self-tests passed"
         )
 
     def test_info_plist_declares_bluetooth_usage(self):
