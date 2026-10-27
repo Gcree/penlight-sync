@@ -95,13 +95,14 @@ jobs:
         with:
           tag_name: v1.7.0
           target_commitish: ${{ github.sha }}
-          name: 'v1.7.0：跟音樂節拍與 BPM 自動燈光效果'
+          name: 'v1.7.0：網站連動模式、音樂節拍與 BPM 自動燈光效果'
           draft: false
           prerelease: false
           make_latest: true
           body: |
             ## 新增 / New
 
+            - **網站連動模式 / Website mode**：新增「取色來源」選為「網站（Ado 應援預習）」，由本機 WebSocket 即時接收網站播放的歌曲時間、拍點、顏色與高潮閃動，不需螢幕錄製或錄音權限。
             - **跟音樂節拍 / Music beat sync**：將節拍效果整合為「關／自動／加亮／亮滅／換色」（Off / Auto / Boost / Blink / Colors）。
             - **BPM 自動切換 / BPM-based auto mode**：快歌（130 BPM 以上）亮滅、中速（90–130 BPM）換色、慢歌（90 BPM 以下）每兩拍呼吸；切換門檻有 4 BPM 緩衝，尚未估出 BPM 前先使用加亮。
             - **節拍狀態 / Beat status**：顯示偵測到的 BPM 與自動模式選用的效果；音樂停止後回到畫面原色，播放音樂時暫停一般呼吸律動。
