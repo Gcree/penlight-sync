@@ -1,3 +1,4 @@
+import AppKit
 import CoreBluetooth
 import CoreGraphics
 import Foundation
@@ -5,6 +6,7 @@ import Foundation
 private let targetName = "Ado Light Stick"
 private let controlUUID = CBUUID(string: "0000")
 private let selectedLampKey = "selectedLampID"
+private let colorSourceKey = "colorSource"
 private let fadeTimeKey = "fadeTime"
 private let breathingKey = "breathing"
 private let vibranceKey = "vibrance"
@@ -21,6 +23,19 @@ struct DiscoveredLamp: Identifiable, Equatable {
     let id: UUID
     var rssi: Int?
     var remembered: Bool
+}
+
+enum ColorSource: String, CaseIterable, Identifiable {
+    case screen = "screen"
+    case site = "site"
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .screen: return "螢幕"
+        case .site: return "網站（Ado 應援預習）"
+        }
+    }
 }
 
 /// GUI counterpart of the CLI's BLESession: same target checks, write-with-response and watchdogs,
@@ -55,6 +70,16 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published var selectedLampID: UUID? {
         didSet { UserDefaults.standard.set(selectedLampID?.uuidString, forKey: selectedLampKey) }
     }
+    @Published var colorSource: ColorSource {
+        didSet {
+            UserDefaults.standard.set(colorSource.rawValue, forKey: colorSourceKey)
+            switchColorSource()
+        }
+    }
+    @Published private(set) var siteSongId: String = ""
+    @Published private(set) var siteSongTitle: String = ""
+    @Published private(set) var sitePlayingState: String = "等待網站…"
+    @Published private(set) var portInUse: Bool = false
     @Published var fadeTime: TimeInterval {
         didSet {
             engine.fadeTime = effectiveFadeTime
@@ -170,11 +195,19 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private var pendingRGB: ScreenRGB?
     private var stopReason: String?
     private var audioMonitor: SystemAudioMonitor?
+    private var siteLink = SiteLink()
+    private var siteEvaluator = SiteLightEvaluator()
+    private var siteBlinderUntil: Double = 0
+    private var siteColorJitter: (r: Int, g: Int, b: Int) = (0, 0, 0)
+    private var siteAccentUntil: Double = 0
+    private var siteAccentColor: ScreenRGB?
 
     override init() {
         let defaults = UserDefaults.standard
         let savedFade = defaults.object(forKey: fadeTimeKey) as? Double ?? 0.6
         fadeTime = savedFade
+        let savedSource = defaults.string(forKey: colorSourceKey).flatMap(ColorSource.init(rawValue:)) ?? .screen
+        colorSource = savedSource
         breathing = defaults.bool(forKey: breathingKey)
         vibrance = defaults.object(forKey: vibranceKey) as? Double ?? 0.4
         minBrightness = defaults.object(forKey: minBrightnessKey) as? Double ?? 0
@@ -195,6 +228,96 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         }
         needsScreenPermission = !CGPreflightScreenCaptureAccess()
         central = CBCentralManager(delegate: self, queue: .main)
+        setupSiteLink()
+    }
+
+    private func setupSiteLink() {
+        siteLink.onStateUpdate = { [weak self] state, receivedAt in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.siteEvaluator.updateState(state, receivedAt: receivedAt)
+                self.siteSongId = state.song
+                self.siteSongTitle = state.title
+                self.sitePlayingState = state.playing ? "播放中" : "暫停"
+                if self.colorSource == .site, self.phase == .syncing {
+                    self.render()
+                }
+            }
+        }
+        siteLink.onStop = { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.siteEvaluator.reset()
+                self.siteSongId = ""
+                self.siteSongTitle = ""
+                self.siteBlinderUntil = 0
+                self.siteColorJitter = (0, 0, 0)
+                self.siteAccentUntil = 0
+                self.siteAccentColor = nil
+                self.sitePlayingState = "等待網站…"
+                if self.colorSource == .site, self.phase == .syncing {
+                    self.render()
+                }
+            }
+        }
+        if colorSource == .site {
+            startSiteLink()
+        }
+    }
+
+    /// 開啟 Ado 應援預習網站（若正在播放歌曲，直接開啟該歌曲之應援頁面）
+    func openAdoGuideSite() {
+        let base = "https://gcree.github.io/ado-guide/"
+        let urlString = siteSongId.isEmpty ? base : "\(base)#\(siteSongId)"
+        if let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func startSiteLink() {
+        siteLink.start()
+        portInUse = siteLink.portInUse
+        if portInUse {
+            if phase == .syncing { status = syncingStatus }
+            log("錯誤：網站連動用的連接埠 51730 被別的程式佔用。")
+        }
+    }
+
+    private func stopSiteLink() {
+        siteLink.stop()
+        portInUse = false
+    }
+
+    private func switchColorSource() {
+        log("取色來源切換為：\(colorSource.displayName)。")
+        if colorSource == .site {
+            startSiteLink()
+            if phase == .syncing {
+                screenStream?.stop()
+                screenStream = nil
+                stopAudio()
+                siteLink.setLampStatus(.linked)
+                status = syncingStatus
+                render()
+            }
+        } else {
+            stopSiteLink()
+            if phase == .syncing {
+                siteEvaluator.reset()
+                siteSongTitle = ""
+                sitePlayingState = "等待網站…"
+                if !ScreenColorSampler.requestPermissionIfNeeded() {
+                    needsScreenPermission = true
+                    fail("需要螢幕錄製權限。請在「系統設定 › 隱私權與安全性 › 螢幕與系統錄音」允許本 App，然後結束並重新開啟本 App。")
+                    return
+                }
+                needsScreenPermission = false
+                startScreenStream()
+                if beatSync { startAudio() }
+                status = syncingStatus
+                render()
+            }
+        }
     }
 
     var canStart: Bool {
@@ -260,12 +383,17 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         guard canStart, let id = selectedLampID else { return }
         errorMessage = nil
         stopScan()
-        if !ScreenColorSampler.requestPermissionIfNeeded() {
-            needsScreenPermission = true
-            fail("需要螢幕錄製權限。請在「系統設定 › 隱私權與安全性 › 螢幕與系統錄音」允許本 App，然後結束並重新開啟本 App。")
-            return
+        if colorSource == .screen {
+            if !ScreenColorSampler.requestPermissionIfNeeded() {
+                needsScreenPermission = true
+                fail("需要螢幕錄製權限。請在「系統設定 › 隱私權與安全性 › 螢幕與系統錄音」允許本 App，然後結束並重新開啟本 App。")
+                return
+            }
+            needsScreenPermission = false
+        } else {
+            needsScreenPermission = false
+            startSiteLink()
         }
-        needsScreenPermission = false
         guard let target = peripherals[id] ?? central.retrievePeripherals(withIdentifiers: [id]).first else {
             fail("找不到選擇的手燈。請先按「掃描」。")
             return
@@ -282,6 +410,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         engine = makeEngine()
         lastRenderAt = nil
         phase = .connecting
+        siteLink.setLampStatus(.connecting)
         status = "連線中…"
         log("連線 \(targetName)（\(id.uuidString)）。")
         target.delegate = self
@@ -411,6 +540,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         reconnectDeadlineWork?.cancel()
         reconnectDeadlineWork = nil
         phase = .syncing
+        siteLink.setLampStatus(.linked)
         status = syncingStatus
         if reconnected {
             log("已自動重新連線，繼續連動。")
@@ -427,8 +557,12 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         renderTimer = Timer.scheduledTimer(withTimeInterval: Self.renderInterval, repeats: true) { [weak self] _ in
             self?.render()
         }
-        startScreenStream()
-        if beatSync { startAudio() }
+        if colorSource == .screen {
+            startScreenStream()
+            if beatSync { startAudio() }
+        } else {
+            render()
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -507,6 +641,135 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         let now = ProcessInfo.processInfo.systemUptime
         let dt = lastRenderAt.map { now - $0 } ?? 0
         lastRenderAt = now
+
+        if colorSource == .site {
+            let frame = siteEvaluator.evaluate(now: Date(), userBeatStyle: beatStyle)
+            siteSongTitle = siteEvaluator.latestState?.title ?? ""
+            if frame.isWaiting {
+                sitePlayingState = "等待網站…"
+            } else if siteEvaluator.latestState?.playing == true {
+                sitePlayingState = "播放中"
+            } else {
+                sitePlayingState = "暫停"
+            }
+            screenColor = frame.targetColor
+
+            // 下潛蓄力：大鼓第 1 拍前約 80ms 壓暗至 28%，大鼓落地時瞬間暴衝至滿亮，對比度躍升 4～5 倍！
+            let effectiveBrightness = brightness * (frame.isPreDownbeat ? 0.28 : frame.brightnessMultiplier)
+            engine.brightness = effectiveBrightness
+            // 網站模式專屬優化：讓 1～2 拍快速換色與連續鼓聲切換乾脆俐落
+            engine.fadeTime = lowLatency ? 0.10 : min(effectiveFadeTime, 0.20)
+            engine.beatDepth = 0.65 // 拉大拍間動態深度，大幅增強明暗對比（拍間底暗降至 35%）
+
+            let isPlaying = siteEvaluator.latestState?.playing == true && !frame.isWaiting
+            let isListen = siteEvaluator.latestState?.cue == "listen"
+            let hasBeat = isPlaying && !isListen && frame.beatBpm > 0
+
+            if frame.isClimax {
+                engine.beatStyle = .blink
+                engine.beatSync = true
+                engine.breathing = false
+            } else if hasBeat {
+                // 網站模式下：自動與換色風格改用律動加亮，避免 autoStyle 誤判為無亮度的 .colors
+                if beatStyle == .auto || beatStyle == .colors {
+                    engine.beatStyle = .flash
+                } else {
+                    engine.beatStyle = beatStyle
+                }
+                engine.beatSync = true
+                engine.breathing = false
+            } else if isPlaying {
+                // 沒有拍點的歌曲（如 Value）或抒情安靜聽（listen）：自動開啟自然呼吸律動，如螢幕模式般自然！
+                engine.beatSync = false
+                engine.breathing = true
+                engine.beatStyle = .flash
+            } else {
+                // 暫停或等待中
+                engine.beatSync = false
+                engine.breathing = false
+            }
+
+            if frame.shouldBeat {
+                // 節奏強弱層次與有機動態：
+                // 1. 第 1 拍大鼓重拍：滿力衝擊（1.00），固定觸發「舞台盲閃白光爆破」
+                // 2. 第 3 拍次重音：0.70~0.80
+                // 3. 第 2、4 拍弱音律動：0.45~0.55，第 4 拍過門加入鼓點切分音（0.65~0.78）
+                let strength: Double
+                if frame.isBarStart {
+                    strength = 1.00
+                    // 必出舞台盲閃白光爆破：大鼓重拍 100% 觸發高亮白光
+                    if frame.beatBpm >= 100 {
+                        siteBlinderUntil = now + 0.08 // 80ms 盲閃
+                    }
+                } else if frame.beatInBar == 2 {
+                    strength = Double.random(in: 0.70...0.80)
+                } else if frame.beatInBar == 3 && frame.beatBpm >= 115 {
+                    // 第 4 拍鼓點切分音／過門加重（drum fill pickup）
+                    strength = Double.random(in: 0.65...0.78)
+                } else {
+                    strength = Double.random(in: 0.45...0.55)
+                }
+                engine.beat(strength: strength, bpm: frame.beatBpm)
+
+                // 螢幕取色般的色彩有機微擾動（每拍微幅晃動，擺脫固定單一色澤）
+                siteColorJitter = (
+                    Int.random(in: -8...8),
+                    Int.random(in: -8...8),
+                    Int.random(in: -8...8)
+                )
+
+                // 單色歌曲的舞台跳色點綴（例如逆光全紅時，偶爾在次重音閃耀金黃琥珀色）
+                let colorsCount = siteEvaluator.latestState?.colors.count ?? 0
+                if colorsCount <= 1 && frame.beatBpm >= 115 {
+                    if (frame.beatInBar == 2 || frame.isBarStart) && Double.random(in: 0...1) < 0.22 {
+                        let base = frame.targetColor
+                        if base.red > 180 && base.blue < 120 {
+                            // 紅色系 -> 點綴琥珀金黃色
+                            siteAccentColor = ScreenRGB(red: 255, green: 175, blue: 60)
+                            siteAccentUntil = now + 0.12
+                        } else if base.blue > 180 && base.red < 120 {
+                            // 藍色系 -> 點綴青綠／青空色
+                            siteAccentColor = ScreenRGB(red: 60, green: 220, blue: 210)
+                            siteAccentUntil = now + 0.12
+                        } else if base.red > 140 && base.blue > 140 {
+                            // 紫色系 -> 點綴亮洋紅
+                            siteAccentColor = ScreenRGB(red: 255, green: 90, blue: 180)
+                            siteAccentUntil = now + 0.12
+                        }
+                    }
+                }
+            }
+
+            // 計算最終送給 LightEngine 的目標色
+            var effectiveColor = frame.targetColor
+            if now < siteBlinderUntil {
+                // 舞台大盲閃白光爆破：高達 86% 高亮白色核心，隨後迅速綻放回歌曲原色
+                let whiteFactor = 0.86
+                let r = UInt8(min(255.0, Double(effectiveColor.red) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
+                let g = UInt8(min(255.0, Double(effectiveColor.green) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
+                let b = UInt8(min(255.0, Double(effectiveColor.blue) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
+                effectiveColor = ScreenRGB(red: r, green: g, blue: b)
+            } else if now < siteAccentUntil, let accent = siteAccentColor {
+                effectiveColor = accent
+            } else if hasBeat {
+                // 螢幕取色般的色彩有機微擾動
+                let r = UInt8(clamping: Int(effectiveColor.red) + siteColorJitter.r)
+                let g = UInt8(clamping: Int(effectiveColor.green) + siteColorJitter.g)
+                let b = UInt8(clamping: Int(effectiveColor.blue) + siteColorJitter.b)
+                effectiveColor = ScreenRGB(red: r, green: g, blue: b)
+            }
+
+            screenColor = effectiveColor
+            engine.setTarget(effectiveColor)
+        } else {
+            engine.brightness = brightness
+            engine.fadeTime = effectiveFadeTime
+            engine.beatDepth = LightEngine.beatDepth
+            engine.beatStyle = beatStyle
+            engine.beatSync = beatSync
+            engine.breathing = breathing
+        }
+
         let frame = engine.step(dt: dt)
         if engine.musicDetected != musicDetected { musicDetected = engine.musicDetected }
         let roundedBPM = engine.bpm.map { Int($0.rounded()) }
@@ -597,6 +860,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         pendingRGB = nil
         lastRenderAt = nil
         latencySummary = nil
+        siteLink.setLampStatus(.idle)
+        if colorSource != .site {
+            stopSiteLink()
+        }
         if let reason = stopReason {
             errorMessage = reason
             status = "連動已因錯誤停止。"
@@ -629,6 +896,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private func reconnect(because reason: String) {
         guard phase == .syncing, let peripheral else { return }
         phase = .reconnecting
+        siteLink.setLampStatus(.connecting)
         characteristic = nil
         writeStartedAt = nil
         pendingRGB = nil
@@ -702,13 +970,23 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     // MARK: - Helpers
 
     private var syncingStatus: String {
-        captureRegion == nil ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。"
+        if colorSource == .site {
+            if portInUse {
+                return "網站連動用的連接埠 51730 被別的程式佔用。"
+            }
+            return "連動中：跟隨網站（Ado 應援預習）。"
+        }
+        return captureRegion == nil ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。"
     }
 
     /// Re-grades the last screen color so color changes show right away, even on a still screen.
     private func regrade() {
-        guard phase == .syncing || phase == .reconnecting, let screenColor else { return }
-        engine.setTarget(screenColor)
+        guard phase == .syncing || phase == .reconnecting else { return }
+        if colorSource == .site {
+            render()
+        } else if let screenColor {
+            engine.setTarget(screenColor)
+        }
     }
 
     private var effectiveFadeTime: TimeInterval { lowLatency ? min(fadeTime, Self.lowLatencyFade) : fadeTime }

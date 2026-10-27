@@ -56,10 +56,33 @@ internal sealed class UpdateChecker
     /// <summary>The latest release tag when it is newer than this app, otherwise null. Throws when GitHub cannot be reached.</summary>
     public async Task<string?> FindNewerAsync()
     {
-        using var response = await Http.GetAsync(LatestReleaseApi);
-        response.EnsureSuccessStatusCode();
-        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        var tag = json.RootElement.TryGetProperty("tag_name", out var value) ? value.GetString() : null;
+        string? tag = null;
+        try
+        {
+            using var response = await Http.GetAsync(LatestReleaseApi);
+            if (response.IsSuccessStatusCode)
+            {
+                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                tag = json.RootElement.TryGetProperty("tag_name", out var value) ? value.GetString() : null;
+            }
+        }
+        catch { }
+
+        if (tag == null)
+        {
+            // 備援方案：當 API 頻率超限或異常時，向 releases/latest 讀取重定向位址
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Head, DownloadPage);
+                using var response = await Http.SendAsync(request);
+                if (response.RequestMessage?.RequestUri is { } uri && uri.Segments.Length >= 4)
+                {
+                    tag = uri.Segments[^1].TrimEnd('/');
+                }
+            }
+            catch { }
+        }
+
         if (tag == null) throw new HttpRequestException("The release has no tag.");
         return ReleaseVersion.IsNewer(tag, CurrentVersion) ? tag : null;
     }

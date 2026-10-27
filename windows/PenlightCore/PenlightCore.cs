@@ -158,7 +158,8 @@ public sealed class LightEngine
     public const double CutFadeFactor = 0.2;
     public const double MinimumCutFade = 0.08;
     /// <summary>Between beats the lamp rests at 55% brightness; each beat lifts it back to full.</summary>
-    public const double BeatDepth = 0.45;
+    public const double DefaultBeatDepth = 0.45;
+    public double BeatDepth { get; set; } = DefaultBeatDepth;
     public const double BeatDecay = 0.18;
     public const double BeatHold = 2;
     public const double BeatRamp = 0.5;
@@ -499,5 +500,384 @@ public static class ReleaseVersion
             if (x != y) return x > y;
         }
         return false;
+    }
+}
+
+public enum ColorSource
+{
+    Screen,
+    Site
+}
+
+public sealed record SiteBeat(double Bpm, double Offset, bool BarKnown);
+
+public sealed record SiteState(
+    int V,
+    string Type,
+    int Seq,
+    string Song,
+    string Title,
+    bool Playing,
+    double T,
+    double Rate,
+    string[] Colors,
+    bool? ColorsSet = null,
+    SiteBeat? Beat = null,
+    double? Climax = null,
+    string? Cue = null);
+
+public readonly record struct SiteLightFrame(
+    Rgb TargetColor,
+    bool ShouldBeat,
+    double BeatStrength,
+    double BeatBpm,
+    bool IsBarStart,
+    bool IsClimax,
+    bool IsWaiting,
+    double BrightnessMultiplier,
+    double MovieTime,
+    int ColorIndex,
+    int BeatInBar = 0,
+    bool IsPreDownbeat = false);
+
+public static class SiteLinkParser
+{
+    public const int MaxMessageSize = 4096;
+
+    public static bool IsAllowedOrigin(string origin)
+    {
+        if (string.IsNullOrWhiteSpace(origin)) return false;
+        if (origin.Equals("https://gcree.github.io", StringComparison.OrdinalIgnoreCase)) return true;
+        if (Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+        {
+            if ((uri.Scheme == "http" || uri.Scheme == "https") &&
+                (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || uri.Host == "127.0.0.1"))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static Rgb? HexToRgb(string hex)
+    {
+        if (string.IsNullOrWhiteSpace(hex)) return null;
+        var s = hex.Trim();
+        if (s.StartsWith('#')) s = s[1..];
+        if (s.Length != 6) return null;
+        if (uint.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out var val))
+        {
+            var r = (byte)((val >> 16) & 0xFF);
+            var g = (byte)((val >> 8) & 0xFF);
+            var b = (byte)(val & 0xFF);
+            return new Rgb(r, g, b);
+        }
+        return null;
+    }
+
+    public static bool IsStopMessage(string jsonText)
+    {
+        if (jsonText.Length > MaxMessageSize) return false;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(jsonText);
+            var root = doc.RootElement;
+            return root.ValueKind == System.Text.Json.JsonValueKind.Object
+                && root.TryGetProperty("v", out var v) && v.GetInt32() == 1
+                && root.TryGetProperty("type", out var type) && type.GetString() == "stop";
+        }
+        catch { return false; }
+    }
+
+    public static SiteState? ParseState(string jsonText)
+    {
+        if (jsonText.Length > MaxMessageSize) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(jsonText);
+            var root = doc.RootElement;
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+
+            if (!root.TryGetProperty("v", out var vProp) || vProp.GetInt32() != 1) return null;
+            if (!root.TryGetProperty("type", out var typeProp) || typeProp.GetString() != "state") return null;
+            if (!root.TryGetProperty("seq", out var seqProp)) return null;
+            if (!root.TryGetProperty("song", out var songProp)) return null;
+            if (!root.TryGetProperty("title", out var titleProp)) return null;
+            if (!root.TryGetProperty("playing", out var playingProp)) return null;
+            if (!root.TryGetProperty("t", out var tProp)) return null;
+            if (!root.TryGetProperty("rate", out var rateProp)) return null;
+            if (!root.TryGetProperty("colors", out var colorsProp) || colorsProp.ValueKind != System.Text.Json.JsonValueKind.Array) return null;
+
+            var colorsList = new List<string>();
+            foreach (var c in colorsProp.EnumerateArray())
+            {
+                if (c.ValueKind == System.Text.Json.JsonValueKind.String && c.GetString() is { } str)
+                    colorsList.Add(str);
+            }
+
+            bool? colorsSet = null;
+            if (root.TryGetProperty("colorsSet", out var csProp) && (csProp.ValueKind == System.Text.Json.JsonValueKind.True || csProp.ValueKind == System.Text.Json.JsonValueKind.False))
+                colorsSet = csProp.GetBoolean();
+
+            SiteBeat? beat = null;
+            if (root.TryGetProperty("beat", out var bProp) && bProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                if (bProp.TryGetProperty("bpm", out var bpmProp) &&
+                    bProp.TryGetProperty("offset", out var offProp) &&
+                    bProp.TryGetProperty("barKnown", out var bkProp))
+                {
+                    beat = new SiteBeat(bpmProp.GetDouble(), offProp.GetDouble(), bkProp.GetBoolean());
+                }
+            }
+
+            double? climax = null;
+            if (root.TryGetProperty("climax", out var cxProp) && cxProp.ValueKind == System.Text.Json.JsonValueKind.Number)
+                climax = cxProp.GetDouble();
+
+            string? cue = null;
+            if (root.TryGetProperty("cue", out var cueProp) && cueProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                cue = cueProp.GetString();
+
+            return new SiteState(
+                vProp.GetInt32(),
+                typeProp.GetString()!,
+                seqProp.GetInt32(),
+                songProp.GetString()!,
+                titleProp.GetString()!,
+                playingProp.GetBoolean(),
+                tProp.GetDouble(),
+                rateProp.GetDouble(),
+                colorsList.ToArray(),
+                colorsSet,
+                beat,
+                climax,
+                cue
+            );
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
+public sealed class SiteLightEvaluator
+{
+    public static readonly Rgb DefaultBlue = new(93, 157, 254); // #5D9DFE
+    public const double WaitingTimeoutSeconds = 5.0;
+
+    public SiteState? LatestState { get; private set; }
+    public DateTime? StateReceivedAt { get; private set; }
+    public double? LastMovieTime { get; private set; }
+    public Rgb LastTargetColor { get; private set; } = DefaultBlue;
+    public int ColorChangeBeatCount { get; private set; }
+
+    public void Reset()
+    {
+        LatestState = null;
+        StateReceivedAt = null;
+        LastMovieTime = null;
+        LastTargetColor = DefaultBlue;
+        ColorChangeBeatCount = 0;
+    }
+
+    public bool UpdateState(SiteState state, DateTime? receivedAt = null)
+    {
+        if (LatestState is { } current && state.Seq <= current.Seq)
+        {
+            return false;
+        }
+        LatestState = state;
+        StateReceivedAt = receivedAt ?? DateTime.UtcNow;
+        return true;
+    }
+
+    public static double CalculateMovieTime(SiteState state, DateTime receivedAt, DateTime now)
+    {
+        if (!state.Playing) return state.T;
+        var elapsed = Math.Max(0.0, (now - receivedAt).TotalSeconds);
+        return state.T + elapsed * state.Rate;
+    }
+
+    public SiteLightFrame Evaluate(DateTime? now = null, BeatStyle userBeatStyle = BeatStyle.Auto)
+    {
+        var currentTime = now ?? DateTime.UtcNow;
+        if (LatestState is not { } state || StateReceivedAt is not { } receivedAt)
+        {
+            return new SiteLightFrame(
+                TargetColor: LastTargetColor,
+                ShouldBeat: false,
+                BeatStrength: 0,
+                BeatBpm: 0,
+                IsBarStart: false,
+                IsClimax: false,
+                IsWaiting: true,
+                BrightnessMultiplier: 0.3,
+                MovieTime: 0,
+                ColorIndex: 0
+            );
+        }
+
+        var elapsedSinceReceive = (currentTime - receivedAt).TotalSeconds;
+        if (elapsedSinceReceive > WaitingTimeoutSeconds)
+        {
+            return new SiteLightFrame(
+                TargetColor: LastTargetColor,
+                ShouldBeat: false,
+                BeatStrength: 0,
+                BeatBpm: 0,
+                IsBarStart: false,
+                IsClimax: false,
+                IsWaiting: true,
+                BrightnessMultiplier: 0.3,
+                MovieTime: LastMovieTime ?? state.T,
+                ColorIndex: 0
+            );
+        }
+
+        var movieTime = CalculateMovieTime(state, receivedAt, currentTime);
+
+        var parsedColors = new List<Rgb>();
+        foreach (var c in state.Colors)
+        {
+            if (SiteLinkParser.HexToRgb(c) is { } rgb)
+                parsedColors.Add(rgb);
+        }
+        var availableColors = parsedColors.Count > 0 ? parsedColors : new List<Rgb> { DefaultBlue };
+
+        var isClimax = false;
+        if (state.Climax is { } climax)
+        {
+            var climaxDuration = (state.Beat is { } b && b.Bpm > 0) ? 8.0 * (60.0 / b.Bpm) : 4.0;
+            if (movieTime >= climax && movieTime < climax + climaxDuration)
+            {
+                isClimax = true;
+            }
+        }
+
+        var isListen = state.Cue == "listen";
+        var brightnessMultiplier = 1.0;
+        if (isListen) brightnessMultiplier = 0.5;
+        if (isClimax) brightnessMultiplier = 1.0;
+
+        var shouldBeat = false;
+        var beatStrength = 0.6;
+        var isBarStart = false;
+        var beatBpm = 0.0;
+        var beatInBar = 0;
+
+        var isHypeCue = state.Cue == "jump" || state.Cue == "call" || state.Cue == "clap" || isClimax;
+
+        if (state.Playing && !isListen && state.Beat is { } beat && beat.Bpm > 0)
+        {
+            beatBpm = beat.Bpm;
+            var beatInterval = 60.0 / beat.Bpm;
+            if (LastMovieTime is { } prevTime)
+            {
+                var prevBeat = (int)Math.Floor((prevTime - beat.Offset) / beatInterval);
+                var currBeat = (int)Math.Floor((movieTime - beat.Offset) / beatInterval);
+                var prevHalfBeat = (int)Math.Floor((prevTime - beat.Offset) / (beatInterval / 2.0));
+                var currHalfBeat = (int)Math.Floor((movieTime - beat.Offset) / (beatInterval / 2.0));
+
+                var isDrumRoll = isClimax || (isHypeCue && beat.Bpm >= 125);
+
+                if (currBeat > prevBeat)
+                {
+                    shouldBeat = true;
+                    beatInBar = ((currBeat % 4) + 4) % 4;
+                    isBarStart = beatInBar == 0;
+                    beatStrength = (beat.BarKnown && isBarStart) ? 1.0 : 0.6;
+                    if (userBeatStyle == BeatStyle.Colors)
+                    {
+                        ColorChangeBeatCount++;
+                    }
+                }
+                else if (isDrumRoll && currHalfBeat > prevHalfBeat)
+                {
+                    shouldBeat = true;
+                    beatInBar = ((currBeat % 4) + 4) % 4;
+                    isBarStart = false;
+                    beatStrength = 0.55;
+                    if (userBeatStyle == BeatStyle.Colors)
+                    {
+                        ColorChangeBeatCount++;
+                    }
+                }
+            }
+        }
+        LastMovieTime = movieTime;
+
+        int colorIndex;
+        if (availableColors.Count <= 1)
+        {
+            colorIndex = 0;
+        }
+        else if (userBeatStyle == BeatStyle.Colors)
+        {
+            colorIndex = ((ColorChangeBeatCount % availableColors.Count) + availableColors.Count) % availableColors.Count;
+        }
+        else if (state.Beat is { } beatData && beatData.Bpm > 0)
+        {
+            var beatInterval = 60.0 / beatData.Bpm;
+            var exactBeat = (movieTime - beatData.Offset) / beatInterval;
+            var beatIdx = (int)Math.Floor(exactBeat);
+            var beatFraction = exactBeat - Math.Floor(exactBeat);
+
+            var isDrumRoll = isClimax || (isHypeCue && beatData.Bpm >= 125) || (beatInBar == 3 && beatFraction >= 0.5 && beatData.Bpm >= 115);
+
+            int colorStepIdx;
+            if (isDrumRoll)
+            {
+                // 連續鼓聲：每 0.5 拍（半拍）極速切換！
+                colorStepIdx = (int)Math.Floor(exactBeat * 2.0);
+            }
+            else if (isHypeCue || beatData.Bpm >= 135)
+            {
+                // 嗨歌／高潮／互動動作／快歌：每 1 拍換一次色！
+                colorStepIdx = beatIdx;
+            }
+            else
+            {
+                // 一般正常段落：每 2 拍換一次色（1～2 拍換一次）！
+                colorStepIdx = (int)Math.Floor((double)beatIdx / 2.0);
+            }
+            colorIndex = ((colorStepIdx % availableColors.Count) + availableColors.Count) % availableColors.Count;
+        }
+        else
+        {
+            var barIdx = (int)Math.Floor(movieTime / 4.0);
+            colorIndex = ((barIdx % availableColors.Count) + availableColors.Count) % availableColors.Count;
+        }
+
+        var chosenColor = availableColors[colorIndex];
+        LastTargetColor = chosenColor;
+
+        var isPreDownbeat = false;
+        if (state.Playing && !isListen && state.Beat is { } bKnown && bKnown.Bpm > 0 && bKnown.BarKnown)
+        {
+            var bInterval = 60.0 / bKnown.Bpm;
+            var exBeat = (movieTime - bKnown.Offset) / bInterval;
+            var bFrac = exBeat - Math.Floor(exBeat);
+            var currBib = (((int)Math.Floor(exBeat) % 4) + 4) % 4;
+            if (currBib == 3 && bFrac >= 0.82)
+            {
+                isPreDownbeat = true;
+            }
+        }
+
+        return new SiteLightFrame(
+            TargetColor: chosenColor,
+            ShouldBeat: shouldBeat,
+            BeatStrength: beatStrength,
+            BeatBpm: beatBpm,
+            IsBarStart: isBarStart,
+            IsClimax: isClimax,
+            IsWaiting: false,
+            BrightnessMultiplier: brightnessMultiplier,
+            MovieTime: movieTime,
+            ColorIndex: colorIndex,
+            BeatInBar: beatInBar,
+            IsPreDownbeat: isPreDownbeat
+        );
     }
 }

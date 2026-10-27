@@ -340,6 +340,148 @@ Check(!ReleaseVersion.IsNewer("v1.4", "1.4.0"), "missing parts count as zero");
 Check(!ReleaseVersion.IsNewer("v1.3.9", "1.4.0"), "older version");
 Check(!ReleaseVersion.IsNewer("nightly", "1.4.0"), "unparseable tag is never newer");
 
+// SiteLightEvaluator and SiteLinkParser: same cases as tests/SiteLightTests.swift.
+var t0 = new DateTime(2026, 10, 26, 12, 0, 0, DateTimeKind.Utc);
+var baseState = new SiteState(
+    V: 1, Type: "state", Seq: 1, Song: "odo", Title: "踊",
+    Playing: true, T: 10.0, Rate: 1.0, Colors: new[] { "#FF4A5A", "#5D9DFE" },
+    Beat: new SiteBeat(128, 1.858, true)
+);
+
+// 1. Movie time calculation
+Check(Math.Abs(SiteLightEvaluator.CalculateMovieTime(baseState, t0, t0.AddSeconds(2.0)) - 12.0) < 0.001, "movie time playing at 1.0x");
+var pausedState = new SiteState(1, "state", 2, "odo", "踊", false, 10.0, 1.0, new[] { "#FF4A5A" });
+Check(Math.Abs(SiteLightEvaluator.CalculateMovieTime(pausedState, t0, t0.AddSeconds(2.0)) - 10.0) < 0.001, "movie time paused");
+var halfSpeedState = new SiteState(1, "state", 3, "odo", "踊", true, 10.0, 0.5, new[] { "#FF4A5A" });
+Check(Math.Abs(SiteLightEvaluator.CalculateMovieTime(halfSpeedState, t0, t0.AddSeconds(2.0)) - 11.0) < 0.001, "movie time at 0.5x");
+
+// 2. 128 BPM under 10 seconds: 21 beats
+var eval128 = new SiteLightEvaluator();
+var start128 = new SiteState(1, "state", 10, "odo", "踊", true, 1.858, 1.0, new[] { "#FF4A5A", "#5D9DFE" },
+    Beat: new SiteBeat(128, 1.858, true));
+eval128.UpdateState(start128, t0);
+eval128.Evaluate(t0); // initialize baseline
+var beatCount = 0;
+var barCount = 0;
+for (var i = 1; i <= 600; i++)
+{
+    var nowT = t0.AddSeconds(i / 60.0);
+    if (i % 60 == 0)
+    {
+        var refresh = new SiteState(1, "state", 10 + i / 60, "odo", "踊", true, 1.858 + (i / 60.0), 1.0, new[] { "#FF4A5A", "#5D9DFE" },
+            Beat: new SiteBeat(128, 1.858, true));
+        eval128.UpdateState(refresh, nowT);
+    }
+    var frame = eval128.Evaluate(nowT);
+    if (frame.ShouldBeat)
+    {
+        beatCount++;
+        if (frame.IsBarStart) barCount++;
+    }
+}
+Check(beatCount == 21, $"128 BPM over 10s should trigger 21 beats, got: {beatCount}");
+Check(barCount == 5, $"128 BPM over 10s should have 5 bar starts, got: {barCount}");
+
+// 3. Color rotation every 2 beats (128 BPM: 0.46875s/beat, 2 beats = 0.9375s)
+var evalBarColor = new SiteLightEvaluator();
+evalBarColor.UpdateState(start128, t0);
+var frameBar0 = evalBarColor.Evaluate(t0.AddSeconds(0.5));
+var frameBar1 = evalBarColor.Evaluate(t0.AddSeconds(1.5));
+Check(frameBar0.TargetColor == new Rgb(255, 74, 90), $"beat 0-1 color red {frameBar0.TargetColor}");
+Check(frameBar1.TargetColor == new Rgb(93, 157, 254), $"beat 2-3 color blue {frameBar1.TargetColor}");
+
+// 3b. Hype cues (jump, call, clap) accelerate color change to every 1 beat
+var evalHypeColor = new SiteLightEvaluator();
+var startHype = new SiteState(1, "state", 15, "odo", "踊", true, 0.0, 1.0, new[] { "#FF4A5A", "#5D9DFE" },
+    Beat: new SiteBeat(120, 0.0, true), Cue: "jump"); // 120 BPM: 0.5s per beat
+evalHypeColor.UpdateState(startHype, t0);
+var frameHype0 = evalHypeColor.Evaluate(t0.AddSeconds(0.2));
+var frameHype1 = evalHypeColor.Evaluate(t0.AddSeconds(0.7));
+var frameHype2 = evalHypeColor.Evaluate(t0.AddSeconds(1.2));
+Check(frameHype0.TargetColor == new Rgb(255, 74, 90), $"hype beat 0 color red {frameHype0.TargetColor}");
+Check(frameHype1.TargetColor == new Rgb(93, 157, 254), $"hype beat 1 color blue {frameHype1.TargetColor}");
+Check(frameHype2.TargetColor == new Rgb(255, 74, 90), $"hype beat 2 color red {frameHype2.TargetColor}");
+
+// 3c. Continuous drum rolls (climax / rolls) accelerate color change to every 0.5 beat (8th note)
+var evalDrumColor = new SiteLightEvaluator();
+var startDrum = new SiteState(1, "state", 16, "odo", "踊", true, 100.0, 1.0, new[] { "#FF4A5A", "#5D9DFE" },
+    Beat: new SiteBeat(120, 0.0, true), Climax: 100.0);
+evalDrumColor.UpdateState(startDrum, t0);
+var frameDrum0 = evalDrumColor.Evaluate(t0.AddSeconds(0.1));
+var frameDrum1 = evalDrumColor.Evaluate(t0.AddSeconds(0.35));
+var frameDrum2 = evalDrumColor.Evaluate(t0.AddSeconds(0.6));
+Check(frameDrum0.TargetColor == new Rgb(255, 74, 90), $"drum sub-beat 0 color red {frameDrum0.TargetColor}");
+Check(frameDrum1.TargetColor == new Rgb(93, 157, 254), $"drum sub-beat 1 color blue {frameDrum1.TargetColor}");
+Check(frameDrum2.TargetColor == new Rgb(255, 74, 90), $"drum sub-beat 2 color red {frameDrum2.TargetColor}");
+
+// 4. Color change every 4s without beat data
+var eval4s = new SiteLightEvaluator();
+var state4s = new SiteState(1, "state", 20, "value", "Value", true, 0.0, 1.0, new[] { "#FF4A5A", "#5D9DFE" });
+eval4s.UpdateState(state4s, t0);
+Check(eval4s.Evaluate(t0.AddSeconds(1.0)).TargetColor == new Rgb(255, 74, 90), "0-4s color red");
+Check(eval4s.Evaluate(t0.AddSeconds(4.5)).TargetColor == new Rgb(93, 157, 254), "4-8s color blue");
+var state4sKeepalive = new SiteState(1, "state", 21, "value", "Value", true, 5.0, 1.0, new[] { "#FF4A5A", "#5D9DFE" });
+eval4s.UpdateState(state4sKeepalive, t0.AddSeconds(5.0)); // simulate protocol keepalive
+Check(eval4s.Evaluate(t0.AddSeconds(8.5)).TargetColor == new Rgb(255, 74, 90), "8-12s cycle back to red");
+
+// 5. Cue "listen" dims to 50% and sends no beats
+var evalListen = new SiteLightEvaluator();
+var stateListen = new SiteState(1, "state", 30, "odo", "踊", true, 1.858, 1.0, new[] { "#FF4A5A" },
+    Beat: new SiteBeat(128, 1.858, true), Cue: "listen");
+evalListen.UpdateState(stateListen, t0);
+evalListen.Evaluate(t0);
+var listenBeatOccurred = false;
+for (var i = 1; i <= 60; i++)
+{
+    var f = evalListen.Evaluate(t0.AddSeconds(i / 60.0));
+    if (f.ShouldBeat) listenBeatOccurred = true;
+    Check(Math.Abs(f.BrightnessMultiplier - 0.5) < 0.001, "listen brightness 0.5");
+}
+Check(!listenBeatOccurred, "listen should not trigger beats");
+
+// 6. Climax 8 beats
+var evalClimax = new SiteLightEvaluator();
+var stateClimax = new SiteState(1, "state", 40, "odo", "踊", true, 100.0, 1.0, new[] { "#FF4A5A" },
+    Beat: new SiteBeat(128, 1.858, true), Climax: 100.0);
+evalClimax.UpdateState(stateClimax, t0);
+var climaxFrame = evalClimax.Evaluate(t0.AddSeconds(1.0));
+Check(climaxFrame.IsClimax, "climax frame within 8 beats");
+var postClimaxFrame = evalClimax.Evaluate(t0.AddSeconds(5.0)); // 8 beats = 3.75s
+Check(!postClimaxFrame.IsClimax, "post-climax frame not climax");
+
+// 7. Old seq discarded
+var evalSeq = new SiteLightEvaluator();
+var stateSeq10 = new SiteState(1, "state", 10, "odo", "踊", true, 10.0, 1.0, new[] { "#FF4A5A" });
+var stateSeq9 = new SiteState(1, "state", 9, "odo", "踊", true, 20.0, 1.0, new[] { "#5D9DFE" });
+Check(evalSeq.UpdateState(stateSeq10, t0), "seq 10 accepted");
+Check(!evalSeq.UpdateState(stateSeq9, t0), "older seq 9 discarded");
+Check(!evalSeq.UpdateState(stateSeq10, t0), "duplicate seq 10 discarded");
+Check(evalSeq.LatestState!.Seq == 10, "latestState kept seq 10");
+
+// 8. 5s timeout waiting state
+var evalTimeout = new SiteLightEvaluator();
+evalTimeout.UpdateState(baseState, t0);
+var activeFrame = evalTimeout.Evaluate(t0.AddSeconds(2.0));
+Check(!activeFrame.IsWaiting, "2s should not be waiting");
+var waitingFrame = evalTimeout.Evaluate(t0.AddSeconds(5.5));
+Check(waitingFrame.IsWaiting, "5.5s should be waiting");
+Check(Math.Abs(waitingFrame.BrightnessMultiplier - 0.3) < 0.001, "waiting brightness multiplier 0.3");
+
+// 9. SiteLinkParser message validation
+Check(SiteLinkParser.ParseState("broken json") == null, "broken json returns null");
+Check(SiteLinkParser.ParseState(new string('a', 5000)) == null, "oversized returns null");
+Check(SiteLinkParser.ParseState("{\"v\":2,\"type\":\"state\",\"seq\":1,\"song\":\"odo\",\"title\":\"踊\",\"playing\":true,\"t\":0,\"rate\":1,\"colors\":[\"#FF4A5A\"]}") == null, "v:2 returns null");
+var validJson = "{\"v\":1,\"type\":\"state\",\"seq\":42,\"song\":\"odo\",\"title\":\"踊\",\"playing\":true,\"t\":83.42,\"rate\":1,\"colors\":[\"#FF4A5A\",\"#5D9DFE\"],\"beat\":{\"bpm\":128,\"offset\":1.858,\"barKnown\":true},\"climax\":169.11,\"cue\":\"clap\"}";
+var parsedState = SiteLinkParser.ParseState(validJson);
+Check(parsedState != null && parsedState.Seq == 42 && parsedState.Cue == "clap" && parsedState.Beat?.Bpm == 128, "valid json parsed correctly");
+
+// 10. Origin whitelist
+Check(SiteLinkParser.IsAllowedOrigin("https://gcree.github.io"), "github pages allowed");
+Check(SiteLinkParser.IsAllowedOrigin("http://localhost:8000"), "localhost allowed");
+Check(SiteLinkParser.IsAllowedOrigin("http://127.0.0.1:51730"), "127.0.0.1 allowed");
+Check(!SiteLinkParser.IsAllowedOrigin("https://example.com"), "example.com disallowed");
+Check(!SiteLinkParser.IsAllowedOrigin(""), "empty origin disallowed");
+
 if (failures > 0)
 {
     Console.Error.WriteLine($"{failures} check(s) failed");

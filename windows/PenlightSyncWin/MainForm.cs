@@ -23,6 +23,8 @@ internal sealed class MainForm : Form
     private readonly Label _status;
     private readonly ColorTile _screenTile = new(glows: false) { Dock = DockStyle.Top };
     private readonly ColorTile _lampTile = new(glows: true) { Dock = DockStyle.Top };
+    private readonly Label _screenTitle;
+    private readonly Label _screenSubtitle;
     private readonly Label _screenHex;
     private readonly Label _lampHex;
     private readonly PillButton _lampButton = new("", ButtonKind.Secondary) { Dock = DockStyle.Fill, AccessibleName = "選擇手燈" };
@@ -33,6 +35,8 @@ internal sealed class MainForm : Form
     private readonly Label _error;
 
     private readonly SegmentedControl _tabs = new("色彩", "動態", "取色範圍", "一般") { Dock = DockStyle.Top };
+    private readonly SegmentedControl _sourcePicker = new("螢幕", "網站（Ado 應援預習）") { Dock = DockStyle.Top };
+    private readonly PillButton _openSiteButton = new("開啟 Ado 應援預習網站 ↗", ButtonKind.Chip) { Height = 30, Visible = false };
     private readonly List<Panel> _pages = new();
     private readonly List<PillButton> _presetChips = new();
     private readonly ParamSlider _fade = new("漸變時間", 0, 2, 0.1, v => v < 0.05 ? "立即" : $"{v:0.0} 秒") { Dock = DockStyle.Fill };
@@ -46,6 +50,9 @@ internal sealed class MainForm : Form
     private readonly Label _regionLabel;
     private readonly PillButton _regionButton = new("框選範圍…") { Width = 120 };
     private readonly PillButton _wholeScreenButton = new("整個螢幕") { Width = 110 };
+    private readonly Panel _siteRegionNotice = new() { Dock = DockStyle.Top, Padding = new Padding(12, 10, 12, 10) };
+    private readonly Panel _screenRegionPanel = new() { Dock = DockStyle.Top };
+    private Panel _regionPage = null!;
     private readonly ToggleSwitch _checkOnLaunch = new("啟動時檢查更新");
     private readonly Label _updateNote;
     private readonly PillButton _checkUpdatesButton = new("立即檢查") { Dock = DockStyle.Fill };
@@ -83,6 +90,8 @@ internal sealed class MainForm : Form
         _status.Dock = DockStyle.Top;
         _status.Height = 42;
         _status.TextAlign = ContentAlignment.TopLeft;
+        _screenTitle = MakeLabel("螢幕", bold: true);
+        _screenSubtitle = MakeLabel("", secondary: true, size: 8.5f);
         _screenHex = MakeLabel("—", secondary: true, size: 8.5f);
         _lampHex = MakeLabel("—", secondary: true, size: 8.5f);
         _error = new Label { AutoSize = true, MaximumSize = new Size(380, 0), Margin = Padding.Empty };
@@ -145,38 +154,55 @@ internal sealed class MainForm : Form
         var header = Columns(30, (_statusPill, -1), (_latency, 0));
         _statusPill.Font = new Font(FontName, 8.5f, FontStyle.Bold);
 
-        var tiles = new TableLayoutPanel { Dock = DockStyle.Top, Height = 120, ColumnCount = 3, RowCount = 1 };
+        var tiles = new TableLayoutPanel { Dock = DockStyle.Top, Height = 138, ColumnCount = 3, RowCount = 1 };
         tiles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         tiles.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28));
         tiles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         var arrow = MakeLabel("→", secondary: true, size: 12f);
         arrow.TextAlign = ContentAlignment.MiddleCenter;
         arrow.AccessibleRole = AccessibleRole.None;
-        tiles.Controls.Add(TileColumn(_screenTile, "螢幕", _screenHex), 0, 0);
+        tiles.Controls.Add(ScreenTileColumn(_screenTile, _screenTitle, _screenSubtitle, _screenHex), 0, 0);
         tiles.Controls.Add(arrow, 1, 0);
-        tiles.Controls.Add(TileColumn(_lampTile, "手燈", _lampHex), 2, 0);
+        tiles.Controls.Add(LampTileColumn(_lampTile, "手燈", _lampHex), 2, 0);
 
         var lampRow = Columns(38, (_lampButton, 0), (_scanButton, 96));
         _scanButton.Margin = new Padding(8, 2, 0, 2);
         _lampButton.Margin = new Padding(0, 2, 0, 2);
 
-        var card = new CardPanel { Dock = DockStyle.Top, Height = 320 };
+        var card = new CardPanel { Dock = DockStyle.Top, Height = 338 };
         AddRows(card, header, _status, tiles, Gap(4), lampRow, Gap(10), _startButton);
         return card;
     }
 
-    private Control TileColumn(ColorTile tile, string title, Label hex)
+    private Control ScreenTileColumn(ColorTile tile, Label title, Label subtitle, Label hex)
     {
-        var caption = Columns(26, (MakeLabel(title, bold: true), 0), (hex, 80));
+        var caption = Columns(24, (title, 0), (hex, 70));
         hex.TextAlign = ContentAlignment.MiddleRight;
+        subtitle.TextAlign = ContentAlignment.TopLeft;
+        subtitle.Height = 18;
+        tile.AccessibleName = "螢幕";
+        var column = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        AddRows(column, tile, Gap(4), caption, subtitle);
+        return column;
+    }
+
+    private Control LampTileColumn(ColorTile tile, string title, Label hex)
+    {
+        var caption = Columns(24, (MakeLabel(title, bold: true), 0), (hex, 70));
+        hex.TextAlign = ContentAlignment.MiddleRight;
+        var spacer = new Panel { Dock = DockStyle.Top, Height = 18 };
         tile.AccessibleName = title;
         var column = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-        AddRows(column, tile, Gap(6), caption);
+        AddRows(column, tile, Gap(4), caption, spacer);
         return column;
     }
 
     private Panel BuildColorPage()
     {
+        var sourceHeading = MakeLabel("取色來源", secondary: true, size: 8.5f);
+        sourceHeading.Dock = DockStyle.Top;
+        sourceHeading.Height = 22;
+
         var chips = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 38, WrapContents = false, Padding = Padding.Empty };
         foreach (var preset in ColorPreset.All)
         {
@@ -197,7 +223,9 @@ internal sealed class MainForm : Form
         hint.Dock = DockStyle.Top;
         hint.Height = 26;
 
-        return Page(heading, chips, Gap(6),
+        _openSiteButton.Click += (_, _) => _controller.OpenAdoGuideSite();
+
+        return Page(sourceHeading, _sourcePicker, Gap(6), _openSiteButton, Gap(8), Separator(), Gap(4), heading, chips, Gap(6),
             Slider("鮮豔度", new ParamSlider("鮮豔度", 0, 1, 0.05, Percent), ColorPreset.Standard.Vibrance,
                 () => _controller.Vibrance, v => _controller.Vibrance = v),
             Slider("最低亮度", new ParamSlider("最低亮度", 0, 0.5, 0.05, v => v < 0.001 ? "關" : Percent(v)), ColorPreset.Standard.MinBrightness,
@@ -240,6 +268,19 @@ internal sealed class MainForm : Form
 
     private Panel BuildRegionPage()
     {
+        var noticeBox = new TintPanel { Dock = DockStyle.Top, Padding = new Padding(12, 10, 12, 10) };
+        var noticeLabel = MakeLabel("網站模式不需要框選。顏色與拍點直接來自 Ado 應援預習網站。", secondary: true);
+        noticeLabel.Dock = DockStyle.Top;
+        noticeLabel.Height = 36;
+        noticeBox.Controls.Add(noticeLabel);
+
+        var regionSiteButton = new PillButton("開啟 Ado 應援預習網站 ↗", ButtonKind.Chip) { Height = 28, Margin = new Padding(0, 4, 0, 0) };
+        regionSiteButton.Click += (_, _) => _controller.OpenAdoGuideSite();
+        noticeBox.Controls.Add(regionSiteButton);
+
+        _siteRegionNotice.Controls.Add(noticeBox);
+        _siteRegionNotice.Height = 88;
+
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40, WrapContents = false };
         _regionButton.Margin = new Padding(0, 4, 8, 4);
         _wholeScreenButton.Margin = new Padding(0, 4, 0, 4);
@@ -250,7 +291,12 @@ internal sealed class MainForm : Form
         hint.Dock = DockStyle.Top;
         hint.Height = 46;
         hint.TextAlign = ContentAlignment.TopLeft;
-        return Page(_regionPreview, Gap(8), _regionLabel, buttons, Gap(4), hint);
+
+        AddRows(_screenRegionPanel, _regionPreview, Gap(8), _regionLabel, buttons, Gap(4), hint);
+        _screenRegionPanel.Height = _regionPreview.Height + 8 + _regionLabel.Height + buttons.Height + 4 + hint.Height;
+
+        _regionPage = Page(_siteRegionNotice, _screenRegionPanel);
+        return _regionPage;
     }
 
     private Panel BuildGeneralPage()
@@ -377,6 +423,11 @@ internal sealed class MainForm : Form
     private void WireEvents()
     {
         _controller.Changed += Render;
+        _sourcePicker.SelectedIndexChanged += (_, _) =>
+        {
+            _controller.ColorSource = _sourcePicker.SelectedIndex == 1 ? ColorSource.Site : ColorSource.Screen;
+            Render();
+        };
         _tabs.SelectedIndexChanged += (_, _) =>
         {
             for (var i = 0; i < _pages.Count; i++) _pages[i].Visible = i == _tabs.SelectedIndex;
@@ -445,6 +496,13 @@ internal sealed class MainForm : Form
             }
             _lampMenu.Show(_lampButton, new Point(0, _lampButton.Height));
         };
+        Action openSiteIfSiteMode = () =>
+        {
+            if (_controller.ColorSource == ColorSource.Site) _controller.OpenAdoGuideSite();
+        };
+        _screenTile.Click += (_, _) => openSiteIfSiteMode();
+        _screenTitle.Click += (_, _) => openSiteIfSiteMode();
+        _screenSubtitle.Click += (_, _) => openSiteIfSiteMode();
         HandleCreated += (_, _) => Theme.ApplyTitleBar(this);
         _log.HandleCreated += (_, _) => Theme.ApplyScrollBars(_log);
         SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
@@ -511,6 +569,32 @@ internal sealed class MainForm : Form
         _lampTile.Swatch = ToColor(_controller.LampColor);
         _screenHex.Text = _controller.ScreenColor?.ToString() ?? "—";
         _lampHex.Text = _controller.LampColor?.ToString() ?? "—";
+
+        var isSite = _controller.ColorSource == ColorSource.Site;
+        if (isSite)
+        {
+            _screenTitle.Text = "網站顏色 ↗";
+            _screenTile.AccessibleName = "網站顏色";
+            _screenSubtitle.Text = string.IsNullOrEmpty(_controller.SiteSongTitle)
+                ? _controller.SitePlayingState
+                : $"〈{_controller.SiteSongTitle}〉{_controller.SitePlayingState}";
+        }
+        else
+        {
+            _screenTitle.Text = "螢幕";
+            _screenTile.AccessibleName = "螢幕";
+            _screenSubtitle.Text = "";
+        }
+        _screenTile.Cursor = isSite ? Cursors.Hand : Cursors.Default;
+        _screenTitle.Cursor = isSite ? Cursors.Hand : Cursors.Default;
+        _screenSubtitle.Cursor = isSite ? Cursors.Hand : Cursors.Default;
+        _sourcePicker.SelectedIndex = isSite ? 1 : 0;
+        _openSiteButton.Visible = isSite;
+        _openSiteButton.Text = string.IsNullOrEmpty(_controller.SiteSongTitle)
+            ? "開啟 Ado 應援預習網站 ↗"
+            : $"在網站開啟〈{_controller.SiteSongTitle}〉 ↗";
+        _openSiteButton.Width = TextRenderer.MeasureText(_openSiteButton.Text, Font).Width + 28;
+
         var failed = _controller.ErrorMessage != null;
         var (pill, tone) = _controller.Phase switch
         {
@@ -551,18 +635,34 @@ internal sealed class MainForm : Form
         _sceneCuts.Checked = _controller.SceneCuts;
         _breathing.Checked = _controller.Breathing;
         _checkOnLaunch.Checked = _updates.CheckOnLaunch;
-        _beatStatus.Text = !_controller.BeatSync ? ""
-            : !_controller.MusicDetected ? "等待音樂…"
-            : (_controller.Bpm is { } bpm ? $"偵測到 {bpm} BPM" : "偵測到節拍")
-                + (_controller.BeatStyle == BeatStyle.Auto && _controller.ActiveBeatStyle is { } picked ? $"・{picked.Name()}" : "");
-        _beatStatus.ForeColor = _controller.MusicDetected ? Theme.Success : Theme.SecondaryText;
+
+        if (isSite)
+        {
+            _beatStatus.Text = _controller.Bpm is { } siteBpm && siteBpm > 0
+                ? $"{siteBpm} BPM（網站節拍）"
+                : "等待網站節拍…";
+            _beatStatus.ForeColor = _controller.Bpm is > 0 ? Theme.Success : Theme.SecondaryText;
+        }
+        else
+        {
+            _beatStatus.Text = !_controller.BeatSync ? ""
+                : !_controller.MusicDetected ? "等待音樂…"
+                : (_controller.Bpm is { } bpm ? $"偵測到 {bpm} BPM" : "偵測到節拍")
+                    + (_controller.BeatStyle == BeatStyle.Auto && _controller.ActiveBeatStyle is { } picked ? $"・{picked.Name()}" : "");
+            _beatStatus.ForeColor = _controller.MusicDetected ? Theme.Success : Theme.SecondaryText;
+        }
         foreach (var chip in _beatStyleChips)
             chip.Selected = chip.Tag is BeatStyle style ? _controller.BeatSync && style == _controller.BeatStyle : !_controller.BeatSync;
-        _beatStyleSummary.Text = _controller.BeatSync ? _controller.BeatStyle.Summary() : "只跟畫面顏色，不聽音樂";
+        _beatStyleSummary.Text = isSite ? "由網站自動同步歌曲拍點與高潮閃爍"
+            : _controller.BeatSync ? _controller.BeatStyle.Summary() : "只跟畫面顏色，不聽音樂";
 
         _regionPreview.Area = _controller.Region;
         _regionLabel.Text = _controller.Region is { } region ? $"目前：框選範圍（寬 {region.Width * 100:0}%、高 {region.Height * 100:0}%）" : "目前：整個主螢幕";
         _wholeScreenButton.Visible = _controller.Region != null;
+
+        _siteRegionNotice.Visible = isSite;
+        _screenRegionPanel.Visible = !isSite;
+        _regionPage.Height = isSite ? _siteRegionNotice.Height : _screenRegionPanel.Height;
 
         if (_log.Visible)
         {

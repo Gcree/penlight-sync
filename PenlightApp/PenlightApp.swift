@@ -141,7 +141,20 @@ private struct LiveCard: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 12) {
-                ColorTile(title: "螢幕", color: controller.screenColor, glows: false)
+                if controller.colorSource == .site {
+                    let sub = controller.siteSongTitle.isEmpty
+                        ? controller.sitePlayingState
+                        : "〈\(controller.siteSongTitle)〉\(controller.sitePlayingState)"
+                    Button {
+                        controller.openAdoGuideSite()
+                    } label: {
+                        ColorTile(title: "網站顏色", subtitle: sub, color: controller.screenColor, glows: false, hasLink: true)
+                    }
+                    .buttonStyle(.plain)
+                    .help("按一下在瀏覽器中開啟 Ado 應援預習網站")
+                } else {
+                    ColorTile(title: "螢幕", color: controller.screenColor, glows: false)
+                }
                 Image(systemName: "arrow.right")
                     .foregroundStyle(Theme.secondaryText)
                     .accessibilityHidden(true)
@@ -245,8 +258,10 @@ private struct StatusPill: View {
 
 private struct ColorTile: View {
     let title: String
+    var subtitle: String? = nil
     let color: ScreenRGB?
     let glows: Bool
+    var hasLink: Bool = false
 
     var body: some View {
         let fill = color.map { Color(red: Double($0.red) / 255, green: Double($0.green) / 255, blue: Double($0.blue) / 255) }
@@ -257,7 +272,22 @@ private struct ColorTile: View {
                 .frame(height: 84)
                 .shadow(color: glows ? (fill ?? .clear).opacity(0.55) : .clear, radius: 14)
             HStack {
-                Text(title).font(.subheadline.weight(.medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(title).font(.subheadline.weight(.medium))
+                        if hasLink {
+                            Image(systemName: "arrow.up.forward.square")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.secondaryText)
+                        }
+                    }
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(Theme.secondaryText)
+                            .lineLimit(1)
+                    }
+                }
                 Spacer()
                 Text(color?.description ?? "—")
                     .font(.caption.monospaced())
@@ -276,6 +306,37 @@ private struct ColorSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("取色來源").font(.caption).foregroundStyle(Theme.secondaryText)
+                Picker("取色來源", selection: $controller.colorSource) {
+                    ForEach(ColorSource.allCases) { source in
+                        Text(source.displayName).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                if controller.colorSource == .site {
+                    HStack {
+                        Button {
+                            controller.openAdoGuideSite()
+                        } label: {
+                            Label(
+                                controller.siteSongTitle.isEmpty ? "開啟 Ado 應援預習網站" : "在網站開啟〈\(controller.siteSongTitle)〉",
+                                systemImage: "safari"
+                            )
+                        }
+                        .buttonStyle(.link)
+                        Spacer()
+                        Image(systemName: "arrow.up.forward.square")
+                            .foregroundStyle(Theme.secondaryText)
+                            .font(.caption2)
+                    }
+                    .padding(.top, 2)
+                }
+            }
+            Divider()
+
             Text("風格預設").font(.caption).foregroundStyle(Theme.secondaryText)
             HStack(spacing: 6) {
                 ForEach(ColorPreset.all) { preset in
@@ -324,7 +385,7 @@ private struct MotionSettings: View {
                     Spacer()
                     Text(musicStatus)
                         .font(.caption)
-                        .foregroundStyle(controller.musicDetected ? Theme.success : Theme.secondaryText)
+                        .foregroundStyle(((controller.colorSource == .site ? (controller.bpm ?? 0) > 0 : controller.musicDetected) ? Theme.success : Theme.secondaryText))
                 }
                 HStack(spacing: 6) {
                     PresetChip(name: "關", selected: !controller.beatSync) { controller.beatSync = false }
@@ -335,7 +396,7 @@ private struct MotionSettings: View {
                         }
                     }
                 }
-                Text(controller.beatSync ? controller.beatStyle.summary : "只跟畫面顏色，不聽音樂")
+                Text(controller.colorSource == .site ? "由網站自動同步歌曲拍點與高潮閃爍" : (controller.beatSync ? controller.beatStyle.summary : "只跟畫面顏色，不聽音樂"))
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryText)
             }
@@ -344,6 +405,12 @@ private struct MotionSettings: View {
 
     /// Detected tempo, plus the style auto picked for it.
     private var musicStatus: String {
+        if controller.colorSource == .site {
+            if let bpm = controller.bpm, bpm > 0 {
+                return "\(bpm) BPM（網站節拍）"
+            }
+            return "等待網站節拍…"
+        }
         guard controller.beatSync else { return "" }
         guard controller.musicDetected else { return "等待音樂…" }
         var text = controller.bpm.map { "偵測到 \($0) BPM" } ?? "偵測到節拍"
@@ -356,19 +423,39 @@ private struct RegionSettings: View {
     @ObservedObject var controller: PenlightController
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            RegionPreview(region: controller.captureRegion)
-            Text(regionDescription)
-            HStack {
-                Button("框選範圍…") { controller.selectRegion() }
-                if controller.captureRegion != nil {
-                    Button("整個螢幕") { controller.useWholeScreen() }
+        if controller.colorSource == .site {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("網站模式不需要框選。顏色與拍點直接來自 Ado 應援預習網站。", systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(Theme.secondaryText)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.field, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                Button {
+                    controller.openAdoGuideSite()
+                } label: {
+                    Label(
+                        controller.siteSongTitle.isEmpty ? "開啟 Ado 應援預習網站" : "在網站開啟〈\(controller.siteSongTitle)〉",
+                        systemImage: "arrow.up.forward.app"
+                    )
                 }
             }
-            Text("影片沒有全螢幕時，框選影片所在區域可讓顏色更準。範圍固定在螢幕上的位置，移動影片視窗後請重新框選。")
-                .font(.caption)
-                .foregroundStyle(Theme.secondaryText)
-                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                RegionPreview(region: controller.captureRegion)
+                Text(regionDescription)
+                HStack {
+                    Button("框選範圍…") { controller.selectRegion() }
+                    if controller.captureRegion != nil {
+                        Button("整個螢幕") { controller.useWholeScreen() }
+                    }
+                }
+                Text("影片沒有全螢幕時，框選影片所在區域可讓顏色更準。範圍固定在螢幕上的位置，移動影片視窗後請重新框選。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

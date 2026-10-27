@@ -62,12 +62,7 @@ final class UpdateChecker: ObservableObject {
         defer { isChecking = false }
         if manual { note = "正在檢查…" }
         do {
-            var request = URLRequest(url: Self.latestReleaseAPI, timeoutInterval: 10)
-            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200,
-                  let tag = (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["tag_name"] as? String
-            else { throw URLError(.badServerResponse) }
+            let tag = try await fetchLatestTag()
             if ReleaseVersion.isNewer(tag, than: currentVersion) {
                 note = "有新版本 \(tag)"
                 if manual || UserDefaults.standard.string(forKey: skippedVersionKey) != tag { offered = Release(version: tag) }
@@ -77,6 +72,29 @@ final class UpdateChecker: ObservableObject {
         } catch {
             if manual { note = "無法檢查更新，請確認網路連線。" }
         }
+    }
+
+    private func fetchLatestTag() async throws -> String {
+        // 1. 先嘗試 GitHub API（需帶 User-Agent 否則會被 GitHub 403 阻擋）
+        var request = URLRequest(url: Self.latestReleaseAPI, timeoutInterval: 10)
+        request.setValue("PenlightSync/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        if let (data, response) = try? await URLSession.shared.data(for: request),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let tag = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["tag_name"] as? String {
+            return tag
+        }
+
+        // 2. 備援方案：當 API 超過存取額度或被擋時，向 releases/latest 送出 HEAD 請求讀取重定向標籤（不受 API 頻率限制）
+        var headRequest = URLRequest(url: Self.downloadPage, timeoutInterval: 10)
+        headRequest.httpMethod = "HEAD"
+        headRequest.setValue("PenlightSync/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        let (_, response) = try await URLSession.shared.data(for: headRequest)
+        if let finalURL = response.url, finalURL.pathComponents.contains("tag"), let tag = finalURL.pathComponents.last {
+            return tag
+        }
+
+        throw URLError(.badServerResponse)
     }
 
     func skip(_ release: Release) {

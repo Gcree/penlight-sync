@@ -78,6 +78,15 @@ internal sealed class PenlightController : IDisposable
     private GattCharacteristic? _characteristic;
     private ulong? _selectedAddress;
 
+    private ColorSource _colorSource = ColorSource.Screen;
+    private readonly SiteLinkWin _siteLink = new();
+    private readonly SiteLightEvaluator _siteEvaluator = new();
+    private readonly Random _rng = new();
+    private DateTime _siteBlinderUntil;
+    private (int r, int g, int b) _siteColorJitter;
+    private DateTime _siteAccentUntil;
+    private Rgb? _siteAccentColor;
+
     public PenlightController()
     {
         _ui = SynchronizationContext.Current ?? throw new InvalidOperationException("Create the controller on the UI thread.");
@@ -97,6 +106,7 @@ internal sealed class PenlightController : IDisposable
                     var number = double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed);
                     switch (parts[0])
                     {
+                        case "source": _colorSource = parts[1] == "site" ? ColorSource.Site : ColorSource.Screen; break;
                         case "fade" when number: _fadeTime = Math.Clamp(parsed, 0, 2); break;
                         case "vibrance" when number: _vibrance = Math.Clamp(parsed, 0, 1); break;
                         case "minBrightness" when number: _minBrightness = Math.Clamp(parsed, 0, 0.5); break;
@@ -123,6 +133,78 @@ internal sealed class PenlightController : IDisposable
         }
         catch (IOException) { }
         _engine = MakeEngine();
+
+        _siteLink.OnStateUpdate = (state, dt) =>
+        {
+            _ui.Post(_ =>
+            {
+                _siteEvaluator.UpdateState(state, dt);
+                SiteSongId = state.Song;
+                SiteSongTitle = state.Title;
+                SitePlayingState = state.Playing ? "播放中" : "暫停";
+                Notify();
+            }, null);
+        };
+        _siteLink.OnStop = () =>
+        {
+            _ui.Post(_ =>
+            {
+                _siteEvaluator.Reset();
+                _siteBlinderUntil = default;
+                _siteColorJitter = (0, 0, 0);
+                _siteAccentUntil = default;
+                _siteAccentColor = null;
+                SitePlayingState = "等待網站…";
+                Notify();
+            }, null);
+        };
+        if (_colorSource == ColorSource.Site)
+        {
+            StartSiteLink();
+        }
+    }
+
+    private void StartSiteLink()
+    {
+        _siteLink.Start();
+        if (_siteLink.PortInUse)
+        {
+            if (Phase == Phase.Syncing) Status = SyncingStatus;
+            Log("錯誤：網站連動用的連接埠 51730 被別的程式佔用。");
+        }
+    }
+
+    private void StopSiteLink()
+    {
+        _siteLink.Stop();
+    }
+
+    public void SwitchColorSource()
+    {
+        Log($"取色來源切換為：{(_colorSource == ColorSource.Site ? "網站（Ado 應援預習）" : "螢幕")}。");
+        if (_colorSource == ColorSource.Site)
+        {
+            StartSiteLink();
+            if (Phase == Phase.Syncing)
+            {
+                StopAudio();
+                _siteLink.SetLampStatus("linked");
+                Status = SyncingStatus;
+            }
+        }
+        else
+        {
+            StopSiteLink();
+            if (Phase == Phase.Syncing)
+            {
+                _siteEvaluator.Reset();
+                SiteSongId = "";
+                SiteSongTitle = "";
+                SitePlayingState = "等待網站…";
+                if (_beatSync) StartAudio();
+                Status = SyncingStatus;
+            }
+        }
     }
 
     private double EffectiveFadeTime => _lowLatency ? Math.Min(_fadeTime, LowLatencyFade) : _fadeTime;
@@ -134,6 +216,35 @@ internal sealed class PenlightController : IDisposable
     };
 
     public event Action? Changed;
+
+    public ColorSource ColorSource
+    {
+        get => _colorSource;
+        set
+        {
+            if (_colorSource == value) return;
+            _colorSource = value;
+            SaveEffects();
+            SwitchColorSource();
+            Notify();
+        }
+    }
+
+    public string SiteSongId { get; private set; } = "";
+    public string SiteSongTitle { get; private set; } = "";
+    public string SitePlayingState { get; private set; } = "等待網站…";
+    public bool PortInUse => _siteLink.PortInUse;
+
+    public void OpenAdoGuideSite()
+    {
+        var baseUri = "https://gcree.github.io/ado-guide/";
+        var url = string.IsNullOrEmpty(SiteSongId) ? baseUri : $"{baseUri}#{SiteSongId}";
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch { }
+    }
 
     public IReadOnlyList<LampInfo> Lamps => _lamps;
     public IReadOnlyList<string> LogLines => _log;
@@ -288,7 +399,21 @@ internal sealed class PenlightController : IDisposable
         }
     }
 
-    private string SyncingStatus => _region == null ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。";
+    private string SyncingStatus
+    {
+        get
+        {
+            if (_colorSource == ColorSource.Site)
+            {
+                if (_siteLink.PortInUse)
+                {
+                    return "連動中：網站模式（連接埠 51730 被佔用，無法接收網站資料）。";
+                }
+                return "連動中：跟隨 Ado 應援預習網站。";
+            }
+            return _region == null ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。";
+        }
+    }
 
     /// <summary>Pulses the lamp on beats in the system audio; starts or stops listening live while syncing.</summary>
     public bool BeatSync
@@ -321,7 +446,8 @@ internal sealed class PenlightController : IDisposable
     {
         string Number(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string Flag(bool value) => value ? "1" : "0";
-        var text = $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
+        var text = $"source={(_colorSource == ColorSource.Site ? "site" : "screen")}\n"
+            + $"fade={Number(_fadeTime)}\nbreathing={Flag(_breathing)}\nvibrance={Number(_vibrance)}\n"
             + $"minBrightness={Number(_minBrightness)}\nwarmth={Number(_warmth)}\nbrightness={Number(_brightness)}\n"
             + $"sceneCuts={Flag(_sceneCuts)}\nbeatSync={Flag(_beatSync)}\nbeatStyle={_beatStyle}\n"
             + $"lowLatency={Flag(_lowLatency)}\n";
@@ -480,7 +606,12 @@ internal sealed class PenlightController : IDisposable
         if (!CanStart || _selectedAddress is not { } address) return;
         ErrorMessage = null;
         StopScan();
+        if (_colorSource == ColorSource.Site)
+        {
+            StartSiteLink();
+        }
         Phase = Phase.Connecting;
+        _siteLink.SetLampStatus("connecting");
         ScreenColor = null;
         LampColor = null;
         _engine = MakeEngine();
@@ -493,9 +624,10 @@ internal sealed class PenlightController : IDisposable
             var characteristic = await ConnectAsync(address);
             if (Phase != Phase.Connecting) return; // Stopped while connecting.
             Phase = Phase.Syncing;
+            _siteLink.SetLampStatus("linked");
             Status = SyncingStatus;
             Log("連動開始。");
-            if (_beatSync) StartAudio();
+            if (_colorSource == ColorSource.Screen && _beatSync) StartAudio();
             Notify();
             BeginSync(characteristic);
         }
@@ -588,6 +720,7 @@ internal sealed class PenlightController : IDisposable
     {
         if (Phase != Phase.Syncing || _selectedAddress is not { } address) return;
         Phase = Phase.Reconnecting;
+        _siteLink.SetLampStatus("connecting");
         LampColor = null; // Rewrite the current color as soon as the link is back.
         Status = $"{reason}，正在自動重新連線（最多 {ReconnectWindow.TotalSeconds:0} 秒）…若一直連不上，請長按手燈背面按鈕進入配對模式。";
         Log($"{reason}，自動重新連線中。");
@@ -607,6 +740,7 @@ internal sealed class PenlightController : IDisposable
                     return;
                 }
                 Phase = Phase.Syncing;
+                _siteLink.SetLampStatus("linked");
                 Status = SyncingStatus;
                 Log("已自動重新連線，繼續連動。");
                 Notify();
@@ -667,6 +801,11 @@ internal sealed class PenlightController : IDisposable
         using var sampler = new ScreenSampler();
         while (!token.IsCancellationRequested)
         {
+            if (_colorSource != ColorSource.Screen)
+            {
+                await Task.Delay(SampleInterval, token);
+                continue;
+            }
             var started = DateTime.UtcNow;
             Rgb color;
             try
@@ -702,8 +841,166 @@ internal sealed class PenlightController : IDisposable
         while (!token.IsCancellationRequested)
         {
             var now = DateTime.UtcNow;
-            var frame = _engine.Step((now - last).TotalSeconds);
+            var dt = (now - last).TotalSeconds;
             last = now;
+
+            if (_colorSource == ColorSource.Site)
+            {
+                var siteFrame = _siteEvaluator.Evaluate(now, _beatStyle);
+                SiteSongTitle = _siteEvaluator.LatestState?.Title ?? "";
+                if (siteFrame.IsWaiting)
+                {
+                    SitePlayingState = "等待網站…";
+                }
+                else if (_siteEvaluator.LatestState?.Playing == true)
+                {
+                    SitePlayingState = "播放中";
+                }
+                else
+                {
+                    SitePlayingState = "暫停";
+                }
+                if (siteFrame.TargetColor != ScreenColor)
+                {
+                    ScreenColor = siteFrame.TargetColor;
+                    _colorsChanged = true;
+                }
+
+                var effectiveBrightness = _brightness * (siteFrame.IsPreDownbeat ? 0.28 : siteFrame.BrightnessMultiplier);
+                _engine.Brightness = effectiveBrightness;
+                _engine.FadeTime = _lowLatency ? 0.10 : Math.Min(EffectiveFadeTime, 0.20);
+                _engine.BeatDepth = 0.65;
+
+                var isPlaying = _siteEvaluator.LatestState?.Playing == true && !siteFrame.IsWaiting;
+                var isListen = _siteEvaluator.LatestState?.Cue == "listen";
+                var hasBeat = isPlaying && !isListen && siteFrame.BeatBpm > 0;
+
+                if (siteFrame.IsClimax)
+                {
+                    _engine.BeatStyle = BeatStyle.Blink;
+                    _engine.BeatSync = true;
+                    _engine.Breathing = false;
+                }
+                else if (hasBeat)
+                {
+                    if (_beatStyle == BeatStyle.Auto || _beatStyle == BeatStyle.Colors)
+                    {
+                        _engine.BeatStyle = BeatStyle.Flash;
+                    }
+                    else
+                    {
+                        _engine.BeatStyle = _beatStyle;
+                    }
+                    _engine.BeatSync = true;
+                    _engine.Breathing = false;
+                }
+                else if (isPlaying)
+                {
+                    _engine.BeatSync = false;
+                    _engine.Breathing = true;
+                    _engine.BeatStyle = BeatStyle.Flash;
+                }
+                else
+                {
+                    _engine.BeatSync = false;
+                    _engine.Breathing = false;
+                }
+
+                if (siteFrame.ShouldBeat)
+                {
+                    double strength;
+                    if (siteFrame.IsBarStart)
+                    {
+                        strength = 1.00;
+                        if (siteFrame.BeatBpm >= 100)
+                        {
+                            _siteBlinderUntil = now.AddMilliseconds(80);
+                        }
+                    }
+                    else if (siteFrame.BeatInBar == 2)
+                    {
+                        strength = 0.70 + _rng.NextDouble() * 0.10;
+                    }
+                    else if (siteFrame.BeatInBar == 3 && siteFrame.BeatBpm >= 115)
+                    {
+                        strength = 0.65 + _rng.NextDouble() * 0.13;
+                    }
+                    else
+                    {
+                        strength = 0.45 + _rng.NextDouble() * 0.10;
+                    }
+                    _engine.Beat(strength, siteFrame.BeatBpm);
+
+                    _siteColorJitter = (
+                        _rng.Next(-8, 9),
+                        _rng.Next(-8, 9),
+                        _rng.Next(-8, 9)
+                    );
+
+                    var colorsCount = _siteEvaluator.LatestState?.Colors.Length ?? 0;
+                    if (colorsCount <= 1 && siteFrame.BeatBpm >= 115)
+                    {
+                        if ((siteFrame.BeatInBar == 2 || siteFrame.IsBarStart) && _rng.NextDouble() < 0.22)
+                        {
+                            var baseCol = siteFrame.TargetColor;
+                            if (baseCol.Red > 180 && baseCol.Blue < 120)
+                            {
+                                _siteAccentColor = new Rgb(255, 175, 60);
+                                _siteAccentUntil = now.AddMilliseconds(120);
+                            }
+                            else if (baseCol.Blue > 180 && baseCol.Red < 120)
+                            {
+                                _siteAccentColor = new Rgb(60, 220, 210);
+                                _siteAccentUntil = now.AddMilliseconds(120);
+                            }
+                            else if (baseCol.Red > 140 && baseCol.Blue > 140)
+                            {
+                                _siteAccentColor = new Rgb(255, 90, 180);
+                                _siteAccentUntil = now.AddMilliseconds(120);
+                            }
+                        }
+                    }
+                }
+
+                var effectiveColor = siteFrame.TargetColor;
+                if (now < _siteBlinderUntil)
+                {
+                    var whiteFactor = 0.86;
+                    var r = (byte)Math.Min(255, (int)(effectiveColor.Red * (1.0 - whiteFactor) + 255 * whiteFactor));
+                    var g = (byte)Math.Min(255, (int)(effectiveColor.Green * (1.0 - whiteFactor) + 255 * whiteFactor));
+                    var b = (byte)Math.Min(255, (int)(effectiveColor.Blue * (1.0 - whiteFactor) + 255 * whiteFactor));
+                    effectiveColor = new Rgb(r, g, b);
+                }
+                else if (now < _siteAccentUntil && _siteAccentColor is { } accent)
+                {
+                    effectiveColor = accent;
+                }
+                else if (hasBeat)
+                {
+                    var r = (byte)Math.Clamp((int)effectiveColor.Red + _siteColorJitter.r, 0, 255);
+                    var g = (byte)Math.Clamp((int)effectiveColor.Green + _siteColorJitter.g, 0, 255);
+                    var b = (byte)Math.Clamp((int)effectiveColor.Blue + _siteColorJitter.b, 0, 255);
+                    effectiveColor = new Rgb(r, g, b);
+                }
+
+                if (effectiveColor != ScreenColor)
+                {
+                    ScreenColor = effectiveColor;
+                    _colorsChanged = true;
+                }
+                _engine.SetTarget(effectiveColor);
+            }
+            else
+            {
+                _engine.Brightness = _brightness;
+                _engine.FadeTime = EffectiveFadeTime;
+                _engine.BeatDepth = LightEngine.DefaultBeatDepth;
+                _engine.BeatStyle = _beatStyle;
+                _engine.BeatSync = _beatSync;
+                _engine.Breathing = _breathing;
+            }
+
+            var frame = _engine.Step(dt);
             var bpm = _engine.Bpm is { } tempo ? (int)Math.Round(tempo) : (int?)null;
             if (_engine.MusicDetected != MusicDetected || bpm != Bpm || _engine.ActiveBeatStyle != ActiveBeatStyle)
             {
@@ -788,6 +1085,11 @@ internal sealed class PenlightController : IDisposable
         ReleaseDevice();
         Phase = Phase.Idle;
         LatencySummary = null;
+        _siteLink.SetLampStatus("idle");
+        if (_colorSource != ColorSource.Site)
+        {
+            StopSiteLink();
+        }
         if (reason != null)
         {
             ErrorMessage = reason;
@@ -826,7 +1128,17 @@ internal sealed class PenlightController : IDisposable
         try { File.AppendAllText(_logPath, $"{DateTime.Now:yyyy-MM-dd} {entry}{Environment.NewLine}"); } catch (IOException) { }
     }
 
-    private void Notify() => Changed?.Invoke();
+    private void Notify()
+    {
+        if (SynchronizationContext.Current == _ui)
+        {
+            Changed?.Invoke();
+        }
+        else
+        {
+            _ui.Post(_ => Changed?.Invoke(), null);
+        }
+    }
 
     public void Dispose()
     {
@@ -834,6 +1146,7 @@ internal sealed class PenlightController : IDisposable
         _syncCts?.Cancel();
         StopAudio();
         ReleaseDevice();
+        _siteLink.Dispose();
     }
 
     private class SyncException(string message) : Exception(message);

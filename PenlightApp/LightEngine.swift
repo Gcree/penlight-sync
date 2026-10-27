@@ -97,6 +97,7 @@ struct LightEngine {
     var sceneCuts = true
     var beatSync = false
     var beatStyle = BeatStyle.flash
+    var beatDepth: Double = Self.beatDepth
 
     private var target: [Double]?
     private var current: [Double] = [0, 0, 0]
@@ -178,7 +179,7 @@ struct LightEngine {
         switch resolvedStyle {
         case .flash, .auto: // Auto falls back to flash until a tempo is known.
             // The frame right after a beat shows it at full strength; the flash decays from the next frame on.
-            beatScale = 1 - Self.beatDepth * beatActivity * (1 - pulse)
+            beatScale = 1 - beatDepth * beatActivity * (1 - pulse)
         case .blink:
             let onTime = tempo.map { Self.blinkDuty * 60 / $0 } ?? Self.blinkOnTime
             beatScale = sinceBeat < onTime ? 1 : 1 - beatActivity

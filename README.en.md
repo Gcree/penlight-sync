@@ -57,6 +57,25 @@ Run `PenlightSync.exe`; it works the same way as the Mac app. The PC needs Bluet
 - If "Windows protected your PC" appears, click "More info" → "Run anyway" (the app is not commercially code-signed).
 - Log file: `%LOCALAPPDATA%\PenlightSync\latest.log`.
 
+### Website Mode (Linked with Ado Cheer Guide)
+
+Starting in v1.7.0, PenlightSync includes "Website Mode" to link with the [Ado Cheer Guide Website](https://gcree.github.io/ado-guide/). Colors, beat pulses, and climax effects are driven directly by song playback on the website without needing screen recording or microphone permissions:
+
+1. In PenlightSync's "色彩" (Color) tab, set "取色來源" (Color Source) to "網站（Ado 應援預習）" (Website).
+2. Connect to the lamp and click "開始連動" (Start Sync).
+3. Open the Ado Cheer Guide website in your browser and click "連動手燈" (Link Penlight) in the navigation toolbar (disabled by default).
+4. Play any song, and the penlight will automatically sync with the song's penlight colors, tempo pulses, and climax special effects.
+
+**Security and Privacy:**
+- The local server binds strictly to the loopback address `127.0.0.1:51730` and is not exposed to the local network or internet.
+- Strict Origin checks allow only `https://gcree.github.io` and local origins (`http://localhost:*`, `http://127.0.0.1:*`).
+- The website sends only lightweight playback status JSON (song ID, timestamp, playing state); no personal data is collected or transmitted.
+
+**Browser Compatibility:**
+- **Google Chrome / Microsoft Edge / Brave**: Chromium browsers enable Local Network Access (LNA) checks by default, blocking public HTTPS websites from connecting to local `ws://127.0.0.1`. If Chrome shows "找不到 PenlightSync", go to `chrome://flags/#local-network-access-check`, set it to **Disabled**, and restart the browser; or access the site locally via `http://localhost:<port>`.
+- **Firefox**: Connects directly to local WebSockets without flags.
+- **Safari**: Currently unsupported due to WebKit Mixed Content security policy prohibiting unencrypted `ws://` connections from HTTPS sites.
+
 ### Tips
 
 - Play the video full screen, or use 框選範圍… (Select area) to frame it, so the average reflects the video. Black letterbox/pillarbox bars are skipped, white subtitles in the bottom quarter are ignored, and the center counts about twice as much as the corners.
@@ -85,6 +104,7 @@ The launcher only connects to the lamp listed in `device-id.txt`. CoreBluetooth 
 - The v1.3.0 additions (capture area selection, auto-reconnect, BPM-adaptive speed) and the later continuous capture, low-latency mode, latency readout, and Windows 11 connection parameters have only passed automated tests and compilation and **have not been verified on a real lamp yet**.
 - The v1.5.0 update check: version comparison passes the same test cases in Swift and C#, and the GitHub latest-release lookup was confirmed to return a version. The update prompt has not yet been exercised against a real newer release, and the Windows app has still not run on a real PC.
 - The v1.6.0 redesign, style presets, overall brightness, and color temperature: the light math passes the same test cases in Swift and C#; the Mac app was opened and screenshotted in light and dark mode, with all four tabs and a preset checked. **The Windows redesign has only been compiled, not seen on a real PC**, so its layout may need adjusting. The new settings have not been verified on a real lamp.
+- The v1.7.0 Website Mode: pure light evaluator (`SiteLight` / `SiteLightEvaluator`) passes 10 test cases in Swift and C# covering song timestamp tracking, 128 BPM cadence, bar/4s color changes, cue listen dimming, climax 8-beat pulses, seq ordering, and 5s timeout waiting state. Origin whitelist and parsing are verified. Browser connectivity tested in Chrome and Firefox. **The Windows version has cross-compiled and passed self-tests, but has not yet been tested on real Windows hardware**.
 - Not yet verified: long video sessions. If a screen capture or a single write takes longer than 8 seconds, sync stops with an error.
 
 ## Building and tests
