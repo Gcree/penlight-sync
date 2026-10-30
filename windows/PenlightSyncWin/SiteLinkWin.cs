@@ -215,7 +215,7 @@ internal sealed class SiteLinkWin : IDisposable
     {
         try
         {
-            var json = $"{{\"v\":1,\"type\":\"hello\",\"app\":\"PenlightSync\",\"version\":\"1.7.0\",\"lamp\":\"{lampStatus}\"}}";
+            var json = $"{{\"v\":1,\"type\":\"hello\",\"app\":\"PenlightSync\",\"version\":\"1.7.1\",\"lamp\":\"{lampStatus}\"}}";
             var bytes = Encoding.UTF8.GetBytes(json);
             await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
         }

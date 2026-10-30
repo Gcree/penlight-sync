@@ -93,7 +93,7 @@ enum SiteLinkMessageParser {
 /// WebSocket server that receives playback state from the Ado support website.
 final class SiteLink: ObservableObject {
     static let port: UInt16 = 51730
-    static let appVersion = "1.7.0"
+    static let appVersion = "1.7.1"
 
     enum LampStatus: String {
         case linked
