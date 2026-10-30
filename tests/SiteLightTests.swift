@@ -345,6 +345,8 @@ struct SiteLightTests {
 
     // SiteLink: 不在白名單的 Origin 被拒絕
     static func testSiteLinkOriginRejection() {
+        expect(SiteLinkOriginValidator.isValid(origin: "https://ado.kuti.cc"), "ado.kuti.cc should be an allowed Origin")
+
         let link = SiteLink()
         link.start()
 

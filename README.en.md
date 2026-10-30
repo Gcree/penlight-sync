@@ -68,7 +68,7 @@ Starting in v1.7.0, PenlightSync includes "Website Mode" to link with the [Ado C
 
 **Security and Privacy:**
 - The local server binds strictly to the loopback address `127.0.0.1:51730` and is not exposed to the local network or internet.
-- Strict Origin checks allow only `https://gcree.github.io` and local origins (`http://localhost:*`, `http://127.0.0.1:*`).
+- Strict Origin checks allow only `https://gcree.github.io`, `https://ado.kuti.cc`, and local origins (`http://localhost:*`, `http://127.0.0.1:*`).
 - The website sends only lightweight playback status JSON (song ID, timestamp, playing state); no personal data is collected or transmitted.
 
 **Browser Compatibility:**

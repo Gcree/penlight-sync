@@ -477,6 +477,7 @@ Check(parsedState != null && parsedState.Seq == 42 && parsedState.Cue == "clap" 
 
 // 10. Origin whitelist
 Check(SiteLinkParser.IsAllowedOrigin("https://gcree.github.io"), "github pages allowed");
+Check(SiteLinkParser.IsAllowedOrigin("https://ado.kuti.cc"), "ado.kuti.cc allowed");
 Check(SiteLinkParser.IsAllowedOrigin("http://localhost:8000"), "localhost allowed");
 Check(SiteLinkParser.IsAllowedOrigin("http://127.0.0.1:51730"), "127.0.0.1 allowed");
 Check(!SiteLinkParser.IsAllowedOrigin("https://example.com"), "example.com disallowed");

@@ -548,6 +548,7 @@ public static class SiteLinkParser
     {
         if (string.IsNullOrWhiteSpace(origin)) return false;
         if (origin.Equals("https://gcree.github.io", StringComparison.OrdinalIgnoreCase)) return true;
+        if (origin.Equals("https://ado.kuti.cc", StringComparison.OrdinalIgnoreCase)) return true;
         if (Uri.TryCreate(origin, UriKind.Absolute, out var uri))
         {
             if ((uri.Scheme == "http" || uri.Scheme == "https") &&

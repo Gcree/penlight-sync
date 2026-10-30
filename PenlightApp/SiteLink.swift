@@ -7,7 +7,7 @@ enum SiteLinkOriginValidator {
         guard let origin = origin?.trimmingCharacters(in: .whitespacesAndNewlines), !origin.isEmpty else {
             return false
         }
-        if origin == "https://gcree.github.io" {
+        if origin == "https://gcree.github.io" || origin == "https://ado.kuti.cc" {
             return true
         }
         guard let url = URL(string: origin),
