@@ -32,6 +32,13 @@ final class UpdateChecker: ObservableObject {
         var id: String { version }
     }
 
+    enum NoteState: Equatable {
+        case checking
+        case newVersion(String)
+        case upToDate(String)
+        case failed
+    }
+
     static let downloadPage = URL(string: "https://github.com/Gcree/penlight-sync/releases/latest")!
     private static let latestReleaseAPI = URL(string: "https://api.github.com/repos/Gcree/penlight-sync/releases/latest")!
     private let checkOnLaunchKey = "checkUpdatesOnLaunch"
@@ -43,7 +50,7 @@ final class UpdateChecker: ObservableObject {
     }
     @Published private(set) var isChecking = false
     /// Short result of the last check, shown next to the button.
-    @Published private(set) var note: String?
+    @Published private(set) var noteState: NoteState?
     /// Set when a newer release should be offered; the window shows it as an alert.
     @Published var offered: Release?
 
@@ -60,17 +67,17 @@ final class UpdateChecker: ObservableObject {
         guard !isChecking else { return }
         isChecking = true
         defer { isChecking = false }
-        if manual { note = "正在檢查…" }
+        if manual { noteState = .checking }
         do {
             let tag = try await fetchLatestTag()
             if ReleaseVersion.isNewer(tag, than: currentVersion) {
-                note = "有新版本 \(tag)"
+                noteState = .newVersion(tag)
                 if manual || UserDefaults.standard.string(forKey: skippedVersionKey) != tag { offered = Release(version: tag) }
             } else {
-                note = manual ? "已是最新版（v\(currentVersion)）" : nil
+                noteState = manual ? .upToDate(currentVersion) : nil
             }
         } catch {
-            if manual { note = "無法檢查更新，請確認網路連線。" }
+            if manual { noteState = .failed }
         }
     }
 

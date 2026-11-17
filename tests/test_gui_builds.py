@@ -9,6 +9,17 @@ SOURCES = pathlib.Path(__file__).resolve().parents[1]
 DOTNET = shutil.which("dotnet") or str(pathlib.Path.home() / ".dotnet" / "dotnet")
 
 
+def _swift_env():
+    env = dict(os.environ)
+    clt_default_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    if env.get("SDKROOT") in (None, "", clt_default_sdk):
+        clt_sdk26 = pathlib.Path("/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk")
+        clt_plugin = pathlib.Path("/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib")
+        if clt_sdk26.is_dir() and not clt_plugin.exists():
+            env["SDKROOT"] = str(clt_sdk26)
+    return env
+
+
 class MacAppTests(unittest.TestCase):
     def test_gui_sources_compile(self):
         with tempfile.TemporaryDirectory(prefix="penlight-gui-test-") as temporary:
@@ -23,6 +34,8 @@ class MacAppTests(unittest.TestCase):
                     str(SOURCES / "PenlightApp" / "SiteLink.swift"),
                     str(SOURCES / "PenlightApp" / "BeatDetector.swift"),
                     str(SOURCES / "PenlightApp" / "SystemAudioMonitor.swift"),
+                    str(SOURCES / "PenlightApp" / "Localization.swift"),
+                    str(SOURCES / "PenlightApp" / "SettingsStore.swift"),
                     str(SOURCES / "PenlightApp" / "RegionSelector.swift"),
                     str(SOURCES / "PenlightApp" / "ScreenStream.swift"),
                     str(SOURCES / "PenlightApp" / "PenlightController.swift"),
@@ -34,6 +47,7 @@ class MacAppTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                env=_swift_env(),
             )
 
     def compile_and_run(self, sources, marker, parse_as_library=True):
@@ -45,6 +59,7 @@ class MacAppTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                env=_swift_env(),
             )
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -64,6 +79,26 @@ class MacAppTests(unittest.TestCase):
     def test_update_version_comparison(self):
         self.compile_and_run(
             ["PenlightApp/UpdateChecker.swift", "tests/UpdateCheckerTests.swift"], "UpdateChecker self-tests passed"
+        )
+
+    def test_localization(self):
+        self.compile_and_run(
+            [
+                "ScreenColor.swift",
+                "PenlightProtocol.swift",
+                "PenlightApp/LightEngine.swift",
+                "PenlightApp/SiteLight.swift",
+                "PenlightApp/SiteLink.swift",
+                "PenlightApp/BeatDetector.swift",
+                "PenlightApp/SystemAudioMonitor.swift",
+                "PenlightApp/Localization.swift",
+                "PenlightApp/SettingsStore.swift",
+                "PenlightApp/RegionSelector.swift",
+                "PenlightApp/ScreenStream.swift",
+                "PenlightApp/PenlightController.swift",
+                "tests/LocalizationTests.swift",
+            ],
+            "Localization self-tests passed",
         )
 
     def test_site_light_and_link(self):

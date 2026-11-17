@@ -20,8 +20,8 @@ class LauncherTests(unittest.TestCase):
                 (root / 'device-id.txt').write_text('00000000-0000-0000-0000-000000000001\n')
             logs = root / 'logs'
             env = dict(os.environ, PENLIGHT_LOG_DIR=str(logs))
-            result = subprocess.run(['/bin/zsh', str(launcher)], capture_output=True,
-                                    text=True, env=env, timeout=5)
+            result = subprocess.run(['/bin/zsh', str(launcher)], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, env=env, timeout=5)
             log = (logs / 'latest.log').read_text()
             return result, log
 

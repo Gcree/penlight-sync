@@ -22,6 +22,7 @@ struct SiteLightTests {
         testFiveSecondsTimeoutWaiting()
         testMalformedJsonAndSizeLimitAndVersion()
         testSiteLinkOriginRejection()
+        testSiteStageDirectorEffects()
 
         print("SiteLight self-tests passed")
     }
@@ -346,6 +347,8 @@ struct SiteLightTests {
     // SiteLink: 不在白名單的 Origin 被拒絕
     static func testSiteLinkOriginRejection() {
         expect(SiteLinkOriginValidator.isValid(origin: "https://ado.kuti.cc"), "ado.kuti.cc should be an allowed Origin")
+        expect(SiteLinkOriginValidator.isValid(origin: "https://localhost:5173"), "https localhost should be an allowed Origin")
+        expect(SiteLinkOriginValidator.isValid(origin: "http://127.0.0.1:8080"), "http 127.0.0.1 should be an allowed Origin")
 
         let link = SiteLink()
         link.start()
@@ -408,5 +411,48 @@ struct SiteLightTests {
         goodTask.cancel()
         badTask.cancel()
         link.stop()
+    }
+
+    static func testSiteStageDirectorEffects() {
+        let evaluator = SiteLightEvaluator()
+        let director = SiteStageDirector(nextRandom: { 0.5 }) // deterministic: jitter = 0, accent skip (>0.22)
+        let baseDate = Date()
+        let beat = SiteBeat(bpm: 120.0, offset: 0.0, barKnown: true) // 0.5s/beat, 4 beats/bar
+
+        // Before bar start: pre-downbeat dip (beatInBar == 3, fraction >= 0.82 -> t = 1.95s)
+        evaluator.updateState(
+            SiteState(seq: 1, song: "odo", title: "踊", playing: true, t: 1.95, rate: 1.0, colors: ["#FF0000"], beat: beat),
+            receivedAt: baseDate
+        )
+        let pre = director.step(uptime: 1.0, now: baseDate, baseBrightness: 1.0, effectiveFadeTime: 0.6, lowLatency: false, userBeatStyle: .auto, evaluator: evaluator)
+        expect(abs(pre.effectiveBrightness - 0.28) < 0.001, "Pre-downbeat must dip brightness to 0.28: \(pre.effectiveBrightness)")
+        expect(pre.beatStyle == .flash, "Auto style in site mode must resolve to flash on normal beats")
+        expect(pre.effectiveFadeTime == 0.20, "Site mode caps fade time at 0.20s")
+
+        // Bar start at t = 2.01s triggers beat 1 + 80ms white blinder pop
+        let barStart = director.step(uptime: 1.06, now: baseDate.addingTimeInterval(0.06), baseBrightness: 1.0, effectiveFadeTime: 0.6, lowLatency: false, userBeatStyle: .auto, evaluator: evaluator)
+        expect(barStart.beatStrength == 1.0, "Bar start beat strength must be 1.0: \(String(describing: barStart.beatStrength))")
+        expect(barStart.effectiveColor.green > 200 && barStart.effectiveColor.blue > 200, "Bar start blinder must flash near white: \(barStart.effectiveColor)")
+
+        // After 80ms blinder expires, returns to base color
+        let postBlinder = director.step(uptime: 1.16, now: baseDate.addingTimeInterval(0.16), baseBrightness: 1.0, effectiveFadeTime: 0.6, lowLatency: false, userBeatStyle: .auto, evaluator: evaluator)
+        expect(postBlinder.effectiveColor == ScreenRGB(red: 255, green: 0, blue: 0), "Post-blinder color must return to red: \(postBlinder.effectiveColor)")
+
+        // Climax switches beatStyle to blink
+        evaluator.updateState(
+            SiteState(seq: 2, song: "odo", title: "踊", playing: true, t: 50.0, rate: 1.0, colors: ["#FF0000"], beat: beat, climax: 50.0),
+            receivedAt: baseDate.addingTimeInterval(1.0)
+        )
+        let climax = director.step(uptime: 2.0, now: baseDate.addingTimeInterval(1.0), baseBrightness: 1.0, effectiveFadeTime: 0.6, lowLatency: true, userBeatStyle: .flash, evaluator: evaluator)
+        expect(climax.beatStyle == .blink && climax.beatSync && !climax.breathing, "Climax must force blink beat style")
+        expect(climax.effectiveFadeTime == 0.10, "Low latency in site mode must use 0.10s fade")
+
+        // Listen cue disables beatSync and enables gentle breathing
+        evaluator.updateState(
+            SiteState(seq: 3, song: "odo", title: "踊", playing: true, t: 60.0, rate: 1.0, colors: ["#5D9DFE"], beat: beat, cue: "listen"),
+            receivedAt: baseDate.addingTimeInterval(2.0)
+        )
+        let listen = director.step(uptime: 3.0, now: baseDate.addingTimeInterval(2.0), baseBrightness: 1.0, effectiveFadeTime: 0.6, lowLatency: false, userBeatStyle: .auto, evaluator: evaluator)
+        expect(!listen.beatSync && listen.breathing && abs(listen.effectiveBrightness - 0.5) < 0.001, "Listen cue must enable breathing at 0.5 brightness")
     }
 }

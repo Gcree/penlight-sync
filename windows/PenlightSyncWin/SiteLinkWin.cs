@@ -99,21 +99,38 @@ internal sealed class SiteLinkWin : IDisposable
         using (client)
         await using (var stream = client.GetStream())
         {
-            // Read HTTP upgrade request
-            var buffer = new byte[4096];
+            // Read HTTP upgrade request (up to 16 KB to accommodate larger browser cookies/headers).
+            const int maxHeaderBytes = 16384;
+            var buffer = new byte[maxHeaderBytes];
             var bytesRead = 0;
+            var headerEnd = -1;
             while (bytesRead < buffer.Length)
             {
                 var read = await stream.ReadAsync(buffer.AsMemory(bytesRead, buffer.Length - bytesRead), ct);
                 if (read == 0) return;
                 bytesRead += read;
-                if (Encoding.ASCII.GetString(buffer, 0, bytesRead).Contains("\r\n\r\n"))
-                    break;
+                var current = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                headerEnd = current.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (headerEnd >= 0) break;
+            }
+            if (headerEnd < 0)
+            {
+                await SendHttpErrorAsync(stream, 431, "Request Header Fields Too Large");
+                return;
             }
 
-            var requestText = Encoding.ASCII.GetString(buffer, 0, bytesRead);
+            var requestText = Encoding.ASCII.GetString(buffer, 0, headerEnd);
             var lines = requestText.Split("\r\n");
-            if (lines.Length == 0 || !lines[0].StartsWith("GET /ado", StringComparison.OrdinalIgnoreCase))
+            if (lines.Length == 0)
+            {
+                await SendHttpErrorAsync(stream, 400, "Bad Request");
+                return;
+            }
+            var requestParts = lines[0].Split(' ', 3);
+            if (requestParts.Length < 2 ||
+                !string.Equals(requestParts[0], "GET", StringComparison.OrdinalIgnoreCase) ||
+                !(string.Equals(requestParts[1], "/ado", StringComparison.OrdinalIgnoreCase) ||
+                  requestParts[1].StartsWith("/ado?", StringComparison.OrdinalIgnoreCase)))
             {
                 await SendHttpErrorAsync(stream, 400, "Bad Request");
                 return;
@@ -129,8 +146,11 @@ internal sealed class SiteLinkWin : IDisposable
                 }
             }
 
-            // Check Origin
-            if (!headers.TryGetValue("Origin", out var origin) || !SiteLinkParser.IsAllowedOrigin(origin))
+            // Verify WebSocket upgrade + allowed Origin
+            if (!headers.TryGetValue("Upgrade", out var upgrade) ||
+                !string.Equals(upgrade, "websocket", StringComparison.OrdinalIgnoreCase) ||
+                !headers.TryGetValue("Origin", out var origin) ||
+                !SiteLinkParser.IsAllowedOrigin(origin))
             {
                 await SendHttpErrorAsync(stream, 400, "Bad Request");
                 return;
@@ -211,11 +231,14 @@ internal sealed class SiteLinkWin : IDisposable
         }
     }
 
+    private static readonly string AppVersion =
+        typeof(SiteLinkWin).Assembly.GetName().Version is { } v ? $"{v.Major}.{v.Minor}.{v.Build}" : "1.7.1";
+
     private static async Task SendHelloAsync(WebSocket ws, string lampStatus, CancellationToken ct)
     {
         try
         {
-            var json = $"{{\"v\":1,\"type\":\"hello\",\"app\":\"PenlightSync\",\"version\":\"1.7.1\",\"lamp\":\"{lampStatus}\"}}";
+            var json = $"{{\"v\":1,\"type\":\"hello\",\"app\":\"PenlightSync\",\"version\":\"{AppVersion}\",\"lamp\":\"{lampStatus}\"}}";
             var bytes = Encoding.UTF8.GetBytes(json);
             await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
         }

@@ -6,11 +6,15 @@ struct PenlightApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = PenlightController()
     @StateObject private var updates = UpdateChecker()
+    @StateObject private var i18n = LocalizationManager.shared
 
     var body: some Scene {
-        Window("Ado 手燈連動", id: "main") {
-            ContentView(controller: controller, updates: updates)
-                .frame(width: 440, height: 770)
+        Window(L10n.appTitle(i18n.resolved), id: "main") {
+            ContentView(controller: controller, updates: updates, i18n: i18n)
+                .frame(width: 480, height: 800)
+                .onChange(of: i18n.resolved) { _, newLang in
+                    NSApp.windows.forEach { $0.title = L10n.appTitle(newLang) }
+                }
         }
         .windowResizability(.contentSize)
     }
@@ -41,30 +45,25 @@ enum Theme {
     }
 }
 
-enum SettingsTab: String, CaseIterable, Identifiable {
-    case color = "色彩"
-    case motion = "動態"
-    case region = "取色範圍"
-    case general = "一般"
-    var id: String { rawValue }
-}
-
 struct ContentView: View {
     @ObservedObject var controller: PenlightController
     @ObservedObject var updates: UpdateChecker
+    @ObservedObject var i18n: LocalizationManager
     @State private var tab = SettingsTab.color
+
+    private var lang: AppLanguage { i18n.resolved }
 
     var body: some View {
         VStack(spacing: 12) {
-            LiveCard(controller: controller)
+            LiveCard(controller: controller, lang: lang)
 
-            if let error = controller.errorMessage {
+            if let errorText = controller.errorText {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                    Label(errorText.resolve(lang), systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(Theme.danger)
                         .fixedSize(horizontal: false, vertical: true)
                     if controller.needsScreenPermission {
-                        Button("開啟螢幕錄製設定") {
+                        Button(L10n.openScreenPermissionSettings(lang)) {
                             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
                         }
                     }
@@ -75,8 +74,8 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                Picker("設定分頁", selection: $tab) {
-                    ForEach(SettingsTab.allCases) { Text($0.rawValue).tag($0) }
+                Picker(L10n.settingsTabsAccessibility(lang), selection: $tab) {
+                    ForEach(SettingsTab.allCases) { Text(L10n.tabName($0, lang)).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
@@ -84,10 +83,10 @@ struct ContentView: View {
                 ScrollView {
                     Group {
                         switch tab {
-                        case .color: ColorSettings(controller: controller)
-                        case .motion: MotionSettings(controller: controller)
-                        case .region: RegionSettings(controller: controller)
-                        case .general: GeneralSettings(controller: controller, updates: updates)
+                        case .color: ColorSettings(controller: controller, lang: lang)
+                        case .motion: MotionSettings(controller: controller, lang: lang)
+                        case .region: RegionSettings(controller: controller, lang: lang)
+                        case .general: GeneralSettings(controller: controller, updates: updates, i18n: i18n)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -96,7 +95,7 @@ struct ContentView: View {
             }
             .card(fillHeight: true)
 
-            Text("自動略過黑邊與字幕；畫面與聲音都不儲存或上傳。")
+            Text(L10n.footerNotice(lang))
                 .font(.caption)
                 .foregroundStyle(Theme.secondaryText)
         }
@@ -105,14 +104,14 @@ struct ContentView: View {
         .background(Theme.background)
         .tint(Theme.accent)
         .task { await updates.checkOnLaunchIfEnabled() }
-        .alert("有新版本 \(updates.offered?.version ?? "")",
+        .alert(L10n.updateAlertTitle(updates.offered?.version ?? "", lang),
                isPresented: Binding(get: { updates.offered != nil }, set: { if !$0 { updates.offered = nil } }),
                presenting: updates.offered) { release in
-            Button("前往下載") { NSWorkspace.shared.open(UpdateChecker.downloadPage) }
-            Button("略過這個版本") { updates.skip(release) }
-            Button("稍後", role: .cancel) {}
+            Button(L10n.updateDownloadButton(lang)) { NSWorkspace.shared.open(UpdateChecker.downloadPage) }
+            Button(L10n.updateSkipButton(lang)) { updates.skip(release) }
+            Button(L10n.updateLaterButton(lang), role: .cancel) {}
         } message: { _ in
-            Text("目前是 v\(updates.currentVersion)。下載新版後取代舊的 app 即可；更新後需要重新允許藍牙與螢幕錄製權限。")
+            Text(L10n.updateAlertMessage(updates.currentVersion, lang))
         }
     }
 }
@@ -121,55 +120,54 @@ struct ContentView: View {
 
 private struct LiveCard: View {
     @ObservedObject var controller: PenlightController
+    let lang: AppLanguage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                StatusPill(phase: controller.phase, failed: controller.errorMessage != nil)
+                StatusPill(phase: controller.phase, failed: controller.errorText != nil, lang: lang)
                 Spacer()
-                if let latency = controller.latencySummary {
-                    Text(latency)
+                if let latencyText = controller.latencyText {
+                    Text(latencyText.resolve(lang))
                         .font(.caption)
                         .foregroundStyle(Theme.secondaryText)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
             }
-            Text(controller.status)
+            Text(controller.statusText.resolve(lang))
                 .font(.callout)
                 .foregroundStyle(Theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 12) {
                 if controller.colorSource == .site {
-                    let sub = controller.siteSongTitle.isEmpty
-                        ? controller.sitePlayingState
-                        : "〈\(controller.siteSongTitle)〉\(controller.sitePlayingState)"
+                    let sub = L10n.siteSongCaption(title: controller.siteSongTitle, state: controller.sitePlayingState, lang)
                     Button {
                         controller.openAdoGuideSite()
                     } label: {
-                        ColorTile(title: "網站顏色", subtitle: sub, color: controller.screenColor, glows: false, hasLink: true)
+                        ColorTile(title: L10n.siteColorTile(lang), subtitle: sub, color: controller.screenColor, glows: false, hasLink: true)
                     }
                     .buttonStyle(.plain)
-                    .help("按一下在瀏覽器中開啟 Ado 應援預習網站")
+                    .help(L10n.siteColorTooltip(lang))
                 } else {
-                    ColorTile(title: "螢幕", color: controller.screenColor, glows: false)
+                    ColorTile(title: L10n.screenTile(lang), color: controller.screenColor, glows: false)
                 }
                 Image(systemName: "arrow.right")
                     .foregroundStyle(Theme.secondaryText)
                     .accessibilityHidden(true)
-                ColorTile(title: "手燈", color: controller.lampColor, glows: true)
+                ColorTile(title: L10n.lampTile(lang), color: controller.lampColor, glows: true)
             }
 
             HStack(spacing: 8) {
                 if controller.lamps.isEmpty {
-                    Label("尚未找到手燈，請按「掃描」", systemImage: "light.cylindrical.ceiling")
+                    Label(L10n.noLampFoundHint(lang), systemImage: "light.cylindrical.ceiling")
                         .foregroundStyle(Theme.secondaryText)
                         .padding(.horizontal, 10)
                         .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
                         .background(Theme.field, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 } else {
-                    Picker("手燈", selection: $controller.selectedLampID) {
+                    Picker(L10n.lampTile(lang), selection: $controller.selectedLampID) {
                         ForEach(controller.lamps) { lamp in
                             Text(lampLabel(lamp)).tag(Optional(lamp.id))
                         }
@@ -188,7 +186,7 @@ private struct LiveCard: View {
                         } else {
                             Image(systemName: "arrow.clockwise")
                         }
-                        Text(controller.isScanning ? "停止" : "掃描")
+                        Text(L10n.scanButton(isScanning: controller.isScanning, lang))
                     }
                 }
                 .disabled(!controller.bluetoothReady || controller.phase != .idle)
@@ -197,14 +195,14 @@ private struct LiveCard: View {
             Group {
                 if controller.phase == .idle {
                     Button { controller.start() } label: {
-                        Label("開始連動", systemImage: "play.fill").frame(maxWidth: .infinity)
+                        Label(L10n.startSync(lang), systemImage: "play.fill").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!controller.canStart)
                 } else {
                     Button(role: .destructive) { controller.stop() } label: {
-                        Label("停止連動", systemImage: "stop.fill").frame(maxWidth: .infinity)
+                        Label(L10n.stopSync(lang), systemImage: "stop.fill").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
                     .tint(Theme.danger)
@@ -217,7 +215,7 @@ private struct LiveCard: View {
     }
 
     private func lampLabel(_ lamp: DiscoveredLamp) -> String {
-        let detail = lamp.rssi.map { "\($0) dBm" } ?? (lamp.remembered ? "上次使用" : "")
+        let detail = lamp.rssi.map { "\($0) dBm" } ?? (lamp.remembered ? L10n.lampLastUsed(lang) : "")
         return "Ado Light Stick · \(lamp.id.uuidString.prefix(8))" + (detail.isEmpty ? "" : " · \(detail)")
     }
 }
@@ -225,26 +223,17 @@ private struct LiveCard: View {
 private struct StatusPill: View {
     let phase: PenlightController.Phase
     let failed: Bool
+    let lang: AppLanguage
 
     var body: some View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(title).font(.caption.weight(.semibold))
+            Text(L10n.statusPill(phase, failed: failed, lang)).font(.caption.weight(.semibold))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(color.opacity(0.14), in: Capsule())
-    }
-
-    private var title: String {
-        switch phase {
-        case .idle: return failed ? "已停止" : "待機"
-        case .connecting: return "連線中"
-        case .syncing: return "連動中"
-        case .reconnecting: return "重新連線中"
-        case .stopping: return "停止中"
-        }
     }
 
     private var color: Color {
@@ -303,14 +292,15 @@ private struct ColorTile: View {
 
 private struct ColorSettings: View {
     @ObservedObject var controller: PenlightController
+    let lang: AppLanguage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("取色來源").font(.caption).foregroundStyle(Theme.secondaryText)
-                Picker("取色來源", selection: $controller.colorSource) {
+                Text(L10n.colorSourceHeading(lang)).font(.caption).foregroundStyle(Theme.secondaryText)
+                Picker(L10n.colorSourceHeading(lang), selection: $controller.colorSource) {
                     ForEach(ColorSource.allCases) { source in
-                        Text(source.displayName).tag(source)
+                        Text(L10n.colorSourceName(source, lang)).tag(source)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -322,7 +312,7 @@ private struct ColorSettings: View {
                             controller.openAdoGuideSite()
                         } label: {
                             Label(
-                                controller.siteSongTitle.isEmpty ? "開啟 Ado 應援預習網站" : "在網站開啟〈\(controller.siteSongTitle)〉",
+                                L10n.openSiteButton(songTitle: controller.siteSongTitle, lang),
                                 systemImage: "safari"
                             )
                         }
@@ -337,66 +327,64 @@ private struct ColorSettings: View {
             }
             Divider()
 
-            Text("風格預設").font(.caption).foregroundStyle(Theme.secondaryText)
+            Text(L10n.stylePresetsHeading(lang)).font(.caption).foregroundStyle(Theme.secondaryText)
             HStack(spacing: 6) {
                 ForEach(ColorPreset.all) { preset in
-                    PresetChip(name: preset.name, selected: controller.activePreset == preset) { controller.apply(preset) }
+                    PresetChip(name: L10n.presetName(preset, lang), selected: controller.activePreset == preset) { controller.apply(preset) }
                 }
             }
-            ParamSlider(title: "鮮豔度", value: $controller.vibrance, range: 0...1, step: 0.05,
-                        defaultValue: ColorPreset.standard.vibrance) { percent($0) }
-            ParamSlider(title: "最低亮度", value: $controller.minBrightness, range: 0...0.5, step: 0.05,
-                        defaultValue: ColorPreset.standard.minBrightness) { $0 < 0.001 ? "關" : percent($0) }
-            ParamSlider(title: "整體亮度", value: $controller.brightness, range: 0.1...1, step: 0.05,
-                        defaultValue: ColorPreset.standard.brightness) { percent($0) }
-            ParamSlider(title: "色溫", value: $controller.warmth, range: -0.5...0.5, step: 0.05,
-                        defaultValue: ColorPreset.standard.warmth) { warmthText($0) }
-            Text("調整會立刻套用到手燈；左右箭頭可微調選取的滑桿。")
+            ParamSlider(title: L10n.vibranceLabel(lang), value: $controller.vibrance, range: 0...1, step: 0.05,
+                        defaultValue: ColorPreset.standard.vibrance, lang: lang) { percent($0) }
+            ParamSlider(title: L10n.minBrightnessLabel(lang), value: $controller.minBrightness, range: 0...0.5, step: 0.05,
+                        defaultValue: ColorPreset.standard.minBrightness, lang: lang) { $0 < 0.001 ? L10n.offLabel(lang) : percent($0) }
+            ParamSlider(title: L10n.brightnessLabel(lang), value: $controller.brightness, range: 0.1...1, step: 0.05,
+                        defaultValue: ColorPreset.standard.brightness, lang: lang) { percent($0) }
+            ParamSlider(title: L10n.warmthLabel(lang), value: $controller.warmth, range: -0.5...0.5, step: 0.05,
+                        defaultValue: ColorPreset.standard.warmth, lang: lang) { L10n.warmthValue($0, lang) }
+            Text(L10n.colorSliderHint(lang))
                 .font(.caption)
                 .foregroundStyle(Theme.secondaryText)
         }
     }
 
     private func percent(_ value: Double) -> String { "\(Int((value * 100).rounded()))%" }
-
-    private func warmthText(_ value: Double) -> String {
-        let amount = Int((abs(value) * 100).rounded())
-        return amount == 0 ? "中性" : (value > 0 ? "暖 \(amount)" : "冷 \(amount)")
-    }
 }
 
 private struct MotionSettings: View {
     @ObservedObject var controller: PenlightController
+    let lang: AppLanguage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ToggleRow(title: "低延遲模式", subtitle: "漸變最多 0.15 秒，燈光緊跟畫面", isOn: $controller.lowLatency)
-            ParamSlider(title: "漸變時間", value: $controller.fadeTime, range: 0...2, step: 0.1, defaultValue: 0.6) {
-                $0 < 0.05 ? "立即" : String(format: "%.1f 秒", $0)
+            ToggleRow(title: L10n.lowLatencyTitle(lang), subtitle: L10n.lowLatencySubtitle(lang), isOn: $controller.lowLatency)
+            ParamSlider(title: L10n.fadeTimeLabel(lang), value: $controller.fadeTime, range: 0...2, step: 0.1, defaultValue: 0.6, lang: lang) {
+                L10n.fadeTimeValue($0, lang)
             }
             .disabled(controller.lowLatency)
             Divider()
-            ToggleRow(title: "換場快切", subtitle: "畫面大幅換色時加快漸變", isOn: $controller.sceneCuts)
-            ToggleRow(title: "呼吸律動", subtitle: "沒有音樂時，顏色穩定就緩慢起伏", isOn: $controller.breathing)
+            ToggleRow(title: L10n.sceneCutsTitle(lang), subtitle: L10n.sceneCutsSubtitle(lang), isOn: $controller.sceneCuts)
+            ToggleRow(title: L10n.breathingTitle(lang), subtitle: L10n.breathingSubtitle(lang), isOn: $controller.breathing)
             Divider()
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("跟音樂節拍")
+                    Text(L10n.beatSyncTitle(lang))
                     Spacer()
                     Text(musicStatus)
                         .font(.caption)
                         .foregroundStyle(((controller.colorSource == .site ? (controller.bpm ?? 0) > 0 : controller.musicDetected) ? Theme.success : Theme.secondaryText))
                 }
                 HStack(spacing: 6) {
-                    PresetChip(name: "關", selected: !controller.beatSync) { controller.beatSync = false }
+                    PresetChip(name: L10n.offLabel(lang), selected: !controller.beatSync) { controller.beatSync = false }
                     ForEach(BeatStyle.choices) { style in
-                        PresetChip(name: style.name, selected: controller.beatSync && controller.beatStyle == style) {
+                        PresetChip(name: L10n.beatStyleName(style, lang), selected: controller.beatSync && controller.beatStyle == style) {
                             controller.beatStyle = style
                             controller.beatSync = true
                         }
                     }
                 }
-                Text(controller.colorSource == .site ? "由網站自動同步歌曲拍點與高潮閃爍" : (controller.beatSync ? controller.beatStyle.summary : "只跟畫面顏色，不聽音樂"))
+                Text(controller.colorSource == .site
+                     ? L10n.beatSummarySite(lang)
+                     : (controller.beatSync ? L10n.beatStyleSummary(controller.beatStyle, lang) : L10n.beatSummaryOff(lang)))
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryText)
             }
@@ -407,25 +395,24 @@ private struct MotionSettings: View {
     private var musicStatus: String {
         if controller.colorSource == .site {
             if let bpm = controller.bpm, bpm > 0 {
-                return "\(bpm) BPM（網站節拍）"
+                return L10n.musicStatusSiteBpm(bpm, lang)
             }
-            return "等待網站節拍…"
+            return L10n.musicStatusSiteWaiting(lang)
         }
         guard controller.beatSync else { return "" }
-        guard controller.musicDetected else { return "等待音樂…" }
-        var text = controller.bpm.map { "偵測到 \($0) BPM" } ?? "偵測到節拍"
-        if controller.beatStyle == .auto, let active = controller.activeBeatStyle { text += "・\(active.name)" }
-        return text
+        guard controller.musicDetected else { return L10n.musicStatusWaitingMusic(lang) }
+        return L10n.musicStatusDetected(bpm: controller.bpm, activeStyle: controller.activeBeatStyle, isAuto: controller.beatStyle == .auto, lang)
     }
 }
 
 private struct RegionSettings: View {
     @ObservedObject var controller: PenlightController
+    let lang: AppLanguage
 
     var body: some View {
         if controller.colorSource == .site {
             VStack(alignment: .leading, spacing: 12) {
-                Label("網站模式不需要框選。顏色與拍點直接來自 Ado 應援預習網站。", systemImage: "info.circle")
+                Label(L10n.regionSiteNotice(lang), systemImage: "info.circle")
                     .font(.callout)
                     .foregroundStyle(Theme.secondaryText)
                     .padding(12)
@@ -436,7 +423,7 @@ private struct RegionSettings: View {
                     controller.openAdoGuideSite()
                 } label: {
                     Label(
-                        controller.siteSongTitle.isEmpty ? "開啟 Ado 應援預習網站" : "在網站開啟〈\(controller.siteSongTitle)〉",
+                        L10n.openSiteButton(songTitle: controller.siteSongTitle, lang),
                         systemImage: "arrow.up.forward.app"
                     )
                 }
@@ -446,12 +433,12 @@ private struct RegionSettings: View {
                 RegionPreview(region: controller.captureRegion)
                 Text(regionDescription)
                 HStack {
-                    Button("框選範圍…") { controller.selectRegion() }
+                    Button(L10n.selectRegionButton(lang)) { controller.selectRegion() }
                     if controller.captureRegion != nil {
-                        Button("整個螢幕") { controller.useWholeScreen() }
+                        Button(L10n.wholeScreenButton(lang)) { controller.useWholeScreen() }
                     }
                 }
-                Text("影片沒有全螢幕時，框選影片所在區域可讓顏色更準。範圍固定在螢幕上的位置，移動影片視窗後請重新框選。")
+                Text(L10n.regionHint(lang))
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -460,8 +447,8 @@ private struct RegionSettings: View {
     }
 
     private var regionDescription: String {
-        guard let region = controller.captureRegion else { return "目前：整個主螢幕" }
-        return String(format: "目前：框選範圍（寬 %.0f%%、高 %.0f%%）", region.width * 100, region.height * 100)
+        guard let region = controller.captureRegion else { return L10n.regionWholeScreenDesc(lang) }
+        return L10n.regionCustomDesc(widthPct: region.width * 100, heightPct: region.height * 100, lang)
     }
 }
 
@@ -493,24 +480,45 @@ private struct RegionPreview: View {
 private struct GeneralSettings: View {
     @ObservedObject var controller: PenlightController
     @ObservedObject var updates: UpdateChecker
+    @ObservedObject var i18n: LocalizationManager
     @State private var showLog = false
     @State private var confirmReset = false
 
+    private var lang: AppLanguage { i18n.resolved }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ToggleRow(title: "啟動時檢查更新", subtitle: "目前版本 v\(updates.currentVersion)", isOn: $updates.checkOnLaunch)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.languageTitle(lang))
+                    Text(L10n.languageSubtitle(lang))
+                        .font(.caption)
+                        .foregroundStyle(Theme.secondaryText)
+                }
+                Spacer()
+                Picker(L10n.languageTitle(lang), selection: $i18n.preference) {
+                    ForEach(LanguagePreference.allCases) { pref in
+                        Text(L10n.languageOptionName(pref, lang)).tag(pref)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 156)
+            }
+            Divider()
+            ToggleRow(title: L10n.checkUpdatesTitle(lang), subtitle: L10n.currentVersionSubtitle(updates.currentVersion, lang), isOn: $updates.checkOnLaunch)
             HStack {
-                Text(updates.note ?? "只讀取 GitHub 上的版本號，不傳送任何資料。")
+                Text(updateNoteText)
                     .font(.caption)
                     .foregroundStyle(Theme.secondaryText)
                 Spacer()
-                Button("立即檢查") { Task { await updates.check(manual: true) } }
+                Button(L10n.checkNowButton(lang)) { Task { await updates.check(manual: true) } }
                     .disabled(updates.isChecking)
             }
             Divider()
-            DisclosureGroup("執行記錄", isExpanded: $showLog) {
+            DisclosureGroup(L10n.logTitle(lang), isExpanded: $showLog) {
                 ScrollView {
-                    Text(controller.logLines.isEmpty ? "尚無記錄。" : controller.logLines.joined(separator: "\n"))
+                    Text(controller.logLines.isEmpty ? L10n.logEmpty(lang) : controller.logLines.joined(separator: "\n"))
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -524,17 +532,27 @@ private struct GeneralSettings: View {
             Divider()
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("恢復預設效果")
-                    Text("色彩與動態設定全部恢復預設，手燈與取色範圍不變")
+                    Text(L10n.resetTitle(lang))
+                    Text(L10n.resetSubtitle(lang))
                         .font(.caption)
                         .foregroundStyle(Theme.secondaryText)
                 }
                 Spacer()
-                Button("全部重設", role: .destructive) { confirmReset = true }
+                Button(L10n.resetButton(lang), role: .destructive) { confirmReset = true }
             }
-            .confirmationDialog("要把色彩與動態設定全部恢復預設嗎？", isPresented: $confirmReset) {
-                Button("全部重設", role: .destructive) { controller.resetEffects() }
+            .confirmationDialog(L10n.resetConfirmTitle(lang), isPresented: $confirmReset) {
+                Button(L10n.resetButton(lang), role: .destructive) { controller.resetEffects() }
             }
+        }
+    }
+
+    private var updateNoteText: String {
+        switch updates.noteState {
+        case .none: return L10n.updateDefaultNote(lang)
+        case .checking: return L10n.updateChecking(lang)
+        case .newVersion(let tag): return L10n.updateNewVersion(tag, lang)
+        case .upToDate(let version): return L10n.updateLatest(version, lang)
+        case .failed: return L10n.updateFailed(lang)
         }
     }
 }
@@ -547,25 +565,29 @@ private struct ParamSlider: View {
     let range: ClosedRange<Double>
     let step: Double
     let defaultValue: Double
+    let lang: AppLanguage
     let format: (Double) -> String
 
     var body: some View {
         let isDefault = abs(value - defaultValue) < step / 2
         HStack(spacing: 10) {
-            Text(title).frame(width: 64, alignment: .leading)
+            Text(title)
+                .frame(width: 96, alignment: .leading)
+                .lineLimit(1)
             // Snapping in the binding instead of `step:` avoids the stepped slider's crowded tick marks.
             Slider(value: Binding(get: { value }, set: { value = ($0 / step).rounded() * step }), in: range)
                 .accessibilityLabel(title)
                 .accessibilityValue(format(value))
             Text(format(value))
                 .monospacedDigit()
-                .frame(width: 52, alignment: .trailing)
+                .frame(width: 68, alignment: .trailing)
+                .lineLimit(1)
             Button { value = defaultValue } label: {
                 Image(systemName: "arrow.counterclockwise")
             }
             .buttonStyle(.borderless)
-            .help("恢復預設值")
-            .accessibilityLabel("將\(title)恢復預設值")
+            .help(L10n.resetSliderTooltip(lang))
+            .accessibilityLabel(L10n.resetSliderAccessibility(title, lang))
             .opacity(isDefault ? 0 : 1)
             .disabled(isDefault)
         }

@@ -479,9 +479,43 @@ Check(parsedState != null && parsedState.Seq == 42 && parsedState.Cue == "clap" 
 Check(SiteLinkParser.IsAllowedOrigin("https://gcree.github.io"), "github pages allowed");
 Check(SiteLinkParser.IsAllowedOrigin("https://ado.kuti.cc"), "ado.kuti.cc allowed");
 Check(SiteLinkParser.IsAllowedOrigin("http://localhost:8000"), "localhost allowed");
+Check(SiteLinkParser.IsAllowedOrigin("https://localhost:5173"), "https localhost allowed");
 Check(SiteLinkParser.IsAllowedOrigin("http://127.0.0.1:51730"), "127.0.0.1 allowed");
 Check(!SiteLinkParser.IsAllowedOrigin("https://example.com"), "example.com disallowed");
 Check(!SiteLinkParser.IsAllowedOrigin(""), "empty origin disallowed");
+
+// 11. Language resolution and preset IDs
+Check(LanguageResolver.Detect("zh-TW") == AppLanguage.ZhHant, "zh-TW maps to ZhHant");
+Check(LanguageResolver.Detect("zh-Hant-HK") == AppLanguage.ZhHant, "zh-Hant-HK maps to ZhHant");
+Check(LanguageResolver.Detect("ja-JP") == AppLanguage.Ja, "ja-JP maps to Ja");
+Check(LanguageResolver.Detect("en-US") == AppLanguage.En, "en-US maps to En");
+Check(LanguageResolver.Detect("fr-FR") == AppLanguage.En, "unsupported locale falls back to En");
+Check(LanguageResolver.ParsePreference("ja") == LanguagePreference.Ja, "parse ja preference");
+Check(LanguageResolver.ParsePreference("unknown") == LanguagePreference.Auto, "unknown preference defaults to Auto");
+Check(LanguageResolver.Resolve(LanguagePreference.Ja, new System.Globalization.CultureInfo("en-US")) == AppLanguage.Ja, "explicit preference overrides system culture");
+Check(ColorPreset.All.Select(p => p.Id).Distinct().Count() == ColorPreset.All.Count, "preset IDs are unique");
+
+// 12. SiteStageDirector concert stage effects
+var stageEval = new SiteLightEvaluator();
+var stageDirector = new SiteStageDirector(() => 0.5);
+var stageBeat = new SiteBeat(120.0, 0.0, true);
+stageEval.UpdateState(new SiteState(1, "state", 1, "odo", "踊", true, 1.95, 1.0, new[] { "#FF0000" }, Beat: stageBeat), t0);
+var stagePre = stageDirector.Step(1.0, t0, 1.0, 0.6, false, BeatStyle.Auto, stageEval);
+Check(Math.Abs(stagePre.EffectiveBrightness - 0.28) < 0.001, "stage pre-downbeat dips to 0.28");
+Check(stagePre.BeatStyle == BeatStyle.Flash, "stage auto resolves to flash");
+Check(Math.Abs(stagePre.EffectiveFadeTime - 0.20) < 0.001, "stage fade capped at 0.20s");
+
+var stageBar = stageDirector.Step(1.06, t0.AddSeconds(0.06), 1.0, 0.6, false, BeatStyle.Auto, stageEval);
+Check(stageBar.BeatStrength == 1.0, "stage bar start strength 1.0");
+Check(stageBar.EffectiveColor.Green > 200 && stageBar.EffectiveColor.Blue > 200, "stage bar start triggers white blinder");
+
+var stagePost = stageDirector.Step(1.16, t0.AddSeconds(0.16), 1.0, 0.6, false, BeatStyle.Auto, stageEval);
+Check(stagePost.EffectiveColor == new Rgb(255, 0, 0), "stage post-blinder restores red");
+
+stageEval.UpdateState(new SiteState(1, "state", 2, "odo", "踊", true, 50.0, 1.0, new[] { "#FF0000" }, Beat: stageBeat, Climax: 50.0), t0.AddSeconds(1.0));
+var stageClimax = stageDirector.Step(2.0, t0.AddSeconds(1.0), 1.0, 0.6, true, BeatStyle.Flash, stageEval);
+Check(stageClimax.BeatStyle == BeatStyle.Blink && stageClimax.BeatSync && !stageClimax.Breathing, "stage climax uses blink");
+Check(Math.Abs(stageClimax.EffectiveFadeTime - 0.10) < 0.001, "stage low-latency fade 0.10s");
 
 if (failures > 0)
 {

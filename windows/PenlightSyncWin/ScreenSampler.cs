@@ -22,7 +22,7 @@ internal sealed class ScreenSampler : IDisposable
     /// <param name="region">Area to sample, normalized 0–1 with a top-left origin; null samples the whole screen.</param>
     public Rgb Sample(RectangleF? region)
     {
-        var screen = Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException("找不到主螢幕。");
+        var screen = Screen.PrimaryScreen?.Bounds ?? throw new InvalidOperationException(L10n.ErrNoPrimaryScreen());
         var bounds = screen;
         if (region is { } r)
         {
@@ -72,7 +72,7 @@ internal sealed class ScreenSampler : IDisposable
             Marshal.Copy(data.Scan0, pixels, 0, pixels.Length);
             // Format32bppArgb is stored as B, G, R, A in memory.
             return AverageColor.Find(pixels, width, height, stride, bgra: true)
-                ?? throw new InvalidOperationException("無法讀取螢幕畫面。");
+                ?? throw new InvalidOperationException(L10n.ErrCannotReadScreen());
         }
         finally
         {

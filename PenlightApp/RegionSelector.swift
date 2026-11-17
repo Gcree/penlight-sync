@@ -98,7 +98,7 @@ private final class SelectionView: NSView {
             outline.lineWidth = 3
             outline.stroke()
         }
-        let text = "拖曳框選影片所在的範圍，手燈只跟這塊畫面變色。按 Esc 取消。" as NSString
+        let text = MainActor.assumeIsolated { L10n.regionOverlayHint(L10n.currentLanguage) } as NSString
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.boldSystemFont(ofSize: 22),
             .foregroundColor: NSColor.white,

@@ -95,7 +95,7 @@ internal sealed class PillButton : Button
         {
             if (_selected == value) return;
             _selected = value;
-            AccessibleDescription = value ? "已選取" : null;
+            AccessibleDescription = value ? L10n.SelectedAccessibility() : null;
             Invalidate();
         }
     }
@@ -355,7 +355,7 @@ internal sealed class ParamSlider : Control
 /// <summary>Row of mutually exclusive tabs drawn as a segmented control.</summary>
 internal sealed class SegmentedControl : Control
 {
-    private readonly string[] _items;
+    private string[] _items;
     private int _selected;
 
     public SegmentedControl(params string[] items)
@@ -364,10 +364,19 @@ internal sealed class SegmentedControl : Control
             | ControlStyles.Selectable | ControlStyles.ResizeRedraw, true);
         _items = items;
         AccessibleRole = AccessibleRole.PageTabList;
-        AccessibleName = "設定分頁";
+        AccessibleName = L10n.SettingsTabsAccessibility();
         TabStop = true;
         Height = 32;
         Cursor = Cursors.Hand;
+    }
+
+    public void SetItems(params string[] items)
+    {
+        if (items.Length == 0) return;
+        _items = items;
+        _selected = Math.Clamp(_selected, 0, _items.Length - 1);
+        AccessibleDescription = _items[_selected];
+        Invalidate();
     }
 
     public event EventHandler? SelectedIndexChanged;

@@ -11,8 +11,8 @@ enum SiteLinkOriginValidator {
             return true
         }
         guard let url = URL(string: origin),
-              url.scheme == "http",
-              let host = url.host else {
+              (url.scheme == "http" || url.scheme == "https"),
+              let host = url.host?.lowercased() else {
             return false
         }
         if host == "localhost" || host == "127.0.0.1" {
@@ -93,7 +93,7 @@ enum SiteLinkMessageParser {
 /// WebSocket server that receives playback state from the Ado support website.
 final class SiteLink: ObservableObject {
     static let port: UInt16 = 51730
-    static let appVersion = "1.7.1"
+    static let appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.7.1"
 
     enum LampStatus: String {
         case linked
@@ -118,6 +118,7 @@ final class SiteLink: ObservableObject {
     private var lastStateReceivedDate: Date?
     private var lampStatus: LampStatus = .idle
     private var isHandshakeAccepted = false
+    private var readyConnections = Set<ObjectIdentifier>()
 
     init() {}
 
@@ -130,7 +131,7 @@ final class SiteLink: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             self.lampStatus = status
-            if let conn = self.activeConnection, self.isHandshakeAccepted {
+            if let conn = self.activeConnection, self.readyConnections.contains(ObjectIdentifier(conn)) {
                 self.sendHello(on: conn, lamp: status)
             }
         }
@@ -235,22 +236,26 @@ final class SiteLink: ObservableObject {
         activeConnection?.cancel()
         activeConnection = connection
         isHandshakeAccepted = false
+        let connId = ObjectIdentifier(connection)
 
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
-                guard self.isHandshakeAccepted else {
-                    // Rejected connection must not send hello or receive messages
+                let accepted = self.isHandshakeAccepted
+                self.isHandshakeAccepted = false
+                guard accepted, self.activeConnection === connection else {
                     connection.cancel()
                     return
                 }
+                self.readyConnections.insert(connId)
                 DispatchQueue.main.async {
                     self.hasClient = true
                 }
                 self.sendHello(on: connection, lamp: self.lampStatus)
                 self.receiveNextMessage(on: connection)
             case .failed, .cancelled:
+                self.readyConnections.remove(connId)
                 if self.activeConnection === connection {
                     self.activeConnection = nil
                     DispatchQueue.main.async {

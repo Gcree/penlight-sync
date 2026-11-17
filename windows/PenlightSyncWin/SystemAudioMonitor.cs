@@ -31,7 +31,7 @@ internal sealed class SystemAudioMonitor : IDisposable
         var encoding = format is WaveFormatExtensible extensible ? extensible.ToStandardWaveFormat().Encoding : format.Encoding;
         _isFloat = encoding == WaveFormatEncoding.IeeeFloat;
         if (!(_isFloat && _bytesPerSample == 4) && !(!_isFloat && _bytesPerSample == 2))
-            throw new NotSupportedException($"不支援的音訊格式：{format}");
+            throw new NotSupportedException(L10n.ErrUnsupportedAudioFormat($"{format}"));
         _detector = new BeatDetector(format.SampleRate);
         _capture.DataAvailable += OnData;
         _capture.RecordingStopped += OnStopped;

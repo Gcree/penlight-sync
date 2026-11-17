@@ -7,16 +7,19 @@ namespace PenlightSync.Win;
 
 /// <summary>
 /// Same layout as the Mac app: a live card (status, screen → lamp colors, lamp picker, start/stop) above a tabbed
-/// settings card (色彩／動態／取色範圍／一般). Colors follow the Windows light/dark app setting.
+/// settings card (Color / Motion / Capture Area / General). Colors follow the Windows light/dark app setting.
 /// </summary>
 internal sealed class MainForm : Form
 {
     private const string FontName = "Microsoft JhengHei UI";
 
+    private enum UpdateNoteKind { None, Checking, NewVersion, UpToDate, Failed }
+
     private readonly PenlightController _controller;
     private readonly UpdateChecker _updates = new();
     private readonly HashSet<Label> _secondaryLabels = new();
     private readonly List<SliderRow> _sliderRows = new();
+    private readonly List<Action> _languageUpdaters = new();
 
     private readonly StatusPill _statusPill = new() { Anchor = AnchorStyles.Left };
     private readonly Label _latency;
@@ -26,50 +29,58 @@ internal sealed class MainForm : Form
     private readonly Label _screenTitle;
     private readonly Label _screenSubtitle;
     private readonly Label _screenHex;
+    private readonly Label _lampTitle;
     private readonly Label _lampHex;
-    private readonly PillButton _lampButton = new("", ButtonKind.Secondary) { Dock = DockStyle.Fill, AccessibleName = "選擇手燈" };
-    private readonly PillButton _scanButton = new("掃描") { Dock = DockStyle.Fill };
-    private readonly PillButton _startButton = new("開始連動", ButtonKind.Primary) { Dock = DockStyle.Top, Height = 42 };
+    private readonly PillButton _lampButton = new("", ButtonKind.Secondary) { Dock = DockStyle.Fill };
+    private readonly PillButton _scanButton = new("") { Dock = DockStyle.Fill };
+    private readonly PillButton _startButton = new("", ButtonKind.Primary) { Dock = DockStyle.Top, Height = 42 };
     private readonly ContextMenuStrip _lampMenu = new() { ShowImageMargin = false, ShowCheckMargin = true };
+    private readonly ContextMenuStrip _languageMenu = new() { ShowImageMargin = false, ShowCheckMargin = true };
     private readonly Panel _errorWrap = new() { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(0, 12, 0, 0), Visible = false };
     private readonly Label _error;
 
-    private readonly SegmentedControl _tabs = new("色彩", "動態", "取色範圍", "一般") { Dock = DockStyle.Top };
-    private readonly SegmentedControl _sourcePicker = new("螢幕", "網站（Ado 應援預習）") { Dock = DockStyle.Top };
-    private readonly PillButton _openSiteButton = new("開啟 Ado 應援預習網站 ↗", ButtonKind.Chip) { Height = 30, Visible = false };
+    private readonly SegmentedControl _tabs;
+    private readonly SegmentedControl _sourcePicker;
+    private readonly PillButton _openSiteButton = new("", ButtonKind.Chip) { Height = 30, Visible = false };
     private readonly List<Panel> _pages = new();
     private readonly List<PillButton> _presetChips = new();
-    private readonly ParamSlider _fade = new("漸變時間", 0, 2, 0.1, v => v < 0.05 ? "立即" : $"{v:0.0} 秒") { Dock = DockStyle.Fill };
-    private readonly ToggleSwitch _lowLatency = new("低延遲模式");
-    private readonly ToggleSwitch _sceneCuts = new("換場快切");
-    private readonly ToggleSwitch _breathing = new("呼吸律動");
+    private readonly ParamSlider _fade;
+    private readonly ToggleSwitch _lowLatency;
+    private readonly ToggleSwitch _sceneCuts;
+    private readonly ToggleSwitch _breathing;
     private readonly Label _beatStatus;
     private readonly List<PillButton> _beatStyleChips = new();
     private readonly Label _beatStyleSummary;
     private readonly RegionPreview _regionPreview = new() { Dock = DockStyle.Top };
     private readonly Label _regionLabel;
-    private readonly PillButton _regionButton = new("框選範圍…") { Width = 120 };
-    private readonly PillButton _wholeScreenButton = new("整個螢幕") { Width = 110 };
+    private readonly PillButton _regionButton = new("") { Width = 145 };
+    private readonly PillButton _wholeScreenButton = new("") { Width = 130 };
+    private readonly PillButton _regionSiteButton = new("", ButtonKind.Chip) { Height = 28, Margin = new Padding(0, 4, 0, 0) };
     private readonly Panel _siteRegionNotice = new() { Dock = DockStyle.Top, Padding = new Padding(12, 10, 12, 10) };
     private readonly Panel _screenRegionPanel = new() { Dock = DockStyle.Top };
     private Panel _regionPage = null!;
-    private readonly ToggleSwitch _checkOnLaunch = new("啟動時檢查更新");
+    private readonly PillButton _languageButton = new("", ButtonKind.Secondary) { Dock = DockStyle.Fill };
+    private readonly ToggleSwitch _checkOnLaunch;
     private readonly Label _updateNote;
-    private readonly PillButton _checkUpdatesButton = new("立即檢查") { Dock = DockStyle.Fill };
-    private readonly PillButton _logButton = new("顯示記錄 ▾") { Dock = DockStyle.Fill };
+    private UpdateNoteKind _updateNoteKind = UpdateNoteKind.None;
+    private string? _updateNoteArg;
+    private readonly PillButton _checkUpdatesButton = new("") { Dock = DockStyle.Fill };
+    private readonly PillButton _logButton = new("") { Dock = DockStyle.Fill };
     private readonly TextBox _log = new()
     {
-        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Top, Height = 150,
+        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Top, Height = 140,
         BorderStyle = BorderStyle.None, Visible = false, Font = new Font(FontFamily.GenericMonospace, 8.5f),
     };
-    private readonly PillButton _resetButton = new("全部重設", ButtonKind.Danger) { Dock = DockStyle.Fill };
+    private readonly PillButton _resetButton = new("", ButtonKind.Danger) { Dock = DockStyle.Fill };
     private readonly Panel _generalPage;
 
     private sealed record SliderRow(ParamSlider Slider, Label Value, PillButton Reset, double Default, Func<double> Read);
 
     public MainForm()
     {
-        Text = "Ado 手燈連動";
+        _controller = new PenlightController();
+
+        Text = L10n.AppTitle();
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Font = new Font(FontName, 10f);
         // Sizes below are in 96-DPI units; the form scales them to the monitor's DPI.
@@ -77,34 +88,66 @@ internal sealed class MainForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(440, 800);
+        ClientSize = new Size(480, 865);
         StartPosition = FormStartPosition.CenterScreen;
         _lampMenu.Renderer = new ThemedMenuRenderer();
         _lampMenu.Font = Font;
+        _languageMenu.Renderer = new ThemedMenuRenderer();
+        _languageMenu.Font = Font;
 
-        _controller = new PenlightController();
+        _tabs = new SegmentedControl(L10n.TabNames()) { Dock = DockStyle.Top };
+        _sourcePicker = new SegmentedControl(L10n.ColorSourceNames()) { Dock = DockStyle.Top };
+        _fade = new ParamSlider(L10n.FadeTimeLabel(), 0, 2, 0.1, v => L10n.FadeTimeValue(v)) { Dock = DockStyle.Fill };
+        _lowLatency = new ToggleSwitch(L10n.LowLatencyTitle());
+        _sceneCuts = new ToggleSwitch(L10n.SceneCutsTitle());
+        _breathing = new ToggleSwitch(L10n.BreathingTitle());
+        _checkOnLaunch = new ToggleSwitch(L10n.CheckUpdatesTitle());
+
+        _languageUpdaters.Add(() =>
+        {
+            Text = L10n.AppTitle();
+            _lampButton.AccessibleName = L10n.SelectLampAccessibility();
+            _tabs.AccessibleName = L10n.SettingsTabsAccessibility();
+            _tabs.SetItems(L10n.TabNames());
+            _sourcePicker.AccessibleName = L10n.ColorSourceHeading();
+            _sourcePicker.SetItems(L10n.ColorSourceNames());
+            _fade.AccessibleName = L10n.FadeTimeLabel();
+            _lowLatency.AccessibleName = L10n.LowLatencyTitle();
+            _sceneCuts.AccessibleName = L10n.SceneCutsTitle();
+            _breathing.AccessibleName = L10n.BreathingTitle();
+            _checkOnLaunch.AccessibleName = L10n.CheckUpdatesTitle();
+            _languageButton.Text = $"{L10n.LanguageOptionName(_controller.LanguagePreference)}  ▾";
+            _languageButton.AccessibleName = L10n.LanguageTitle();
+            _regionButton.Text = L10n.SelectRegionButton();
+            _wholeScreenButton.Text = L10n.WholeScreenButton();
+            _checkUpdatesButton.Text = L10n.CheckNowButton();
+            _logButton.Text = L10n.LogToggleButton(_log.Visible);
+            _resetButton.Text = L10n.ResetButton();
+            RefreshUpdateNote();
+        });
 
         _latency = MakeLabel("", secondary: true, size: 8.5f);
         _latency.TextAlign = ContentAlignment.MiddleRight;
         _status = MakeLabel("", secondary: true);
         _status.Dock = DockStyle.Top;
-        _status.Height = 42;
+        _status.Height = 46;
         _status.TextAlign = ContentAlignment.TopLeft;
-        _screenTitle = MakeLabel("螢幕", bold: true);
+        _screenTitle = MakeLabel(L10n.ScreenTile(), bold: true);
         _screenSubtitle = MakeLabel("", secondary: true, size: 8.5f);
         _screenHex = MakeLabel("—", secondary: true, size: 8.5f);
+        _lampTitle = MakeLabel(L10n.LampTile(), bold: true);
         _lampHex = MakeLabel("—", secondary: true, size: 8.5f);
-        _error = new Label { AutoSize = true, MaximumSize = new Size(380, 0), Margin = Padding.Empty };
+        _error = new Label { AutoSize = true, MaximumSize = new Size(420, 0), Margin = Padding.Empty };
         _beatStatus = MakeLabel("", secondary: true, size: 8.5f);
         _beatStatus.TextAlign = ContentAlignment.MiddleRight;
         _beatStyleSummary = MakeLabel("", secondary: true, size: 8.5f);
         _beatStyleSummary.Dock = DockStyle.Top;
-        _beatStyleSummary.Height = 24;
+        _beatStyleSummary.Height = 28;
         _beatStyleSummary.TextAlign = ContentAlignment.TopLeft;
         _regionLabel = MakeLabel("", secondary: false);
         _regionLabel.Dock = DockStyle.Top;
         _regionLabel.Height = 26;
-        _updateNote = MakeLabel("只讀取 GitHub 上的版本號，不傳送任何資料。", secondary: true, size: 8.5f);
+        _updateNote = MakeLabel("", secondary: true, size: 8.5f);
 
         var liveCard = BuildLiveCard();
         var errorBox = new TintPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(12, 10, 12, 10) };
@@ -129,10 +172,11 @@ internal sealed class MainForm : Form
         settingsCard.Controls.Add(Gap(12));
         settingsCard.Controls.Add(_tabs);
 
-        var footer = MakeLabel("自動略過黑邊與字幕；畫面與聲音都不儲存或上傳。", secondary: true, size: 8.5f);
+        var footer = MakeLabel(L10n.FooterNotice(), secondary: true, size: 8.5f);
         footer.Dock = DockStyle.Bottom;
         footer.Height = 30;
         footer.TextAlign = ContentAlignment.MiddleCenter;
+        _languageUpdaters.Add(() => footer.Text = L10n.FooterNotice());
 
         var root = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 16, 16, 4) };
         root.Controls.Add(settingsCard);
@@ -142,6 +186,7 @@ internal sealed class MainForm : Form
         root.Controls.Add(footer);
         Controls.Add(root);
 
+        ApplyLanguage();
         ApplyTheme();
         Render();
         WireEvents();
@@ -163,35 +208,39 @@ internal sealed class MainForm : Form
         arrow.AccessibleRole = AccessibleRole.None;
         tiles.Controls.Add(ScreenTileColumn(_screenTile, _screenTitle, _screenSubtitle, _screenHex), 0, 0);
         tiles.Controls.Add(arrow, 1, 0);
-        tiles.Controls.Add(LampTileColumn(_lampTile, "手燈", _lampHex), 2, 0);
+        tiles.Controls.Add(LampTileColumn(_lampTile, _lampTitle, _lampHex), 2, 0);
 
-        var lampRow = Columns(38, (_lampButton, 0), (_scanButton, 96));
+        var lampRow = Columns(38, (_lampButton, 0), (_scanButton, 108));
         _scanButton.Margin = new Padding(8, 2, 0, 2);
         _lampButton.Margin = new Padding(0, 2, 0, 2);
 
-        var card = new CardPanel { Dock = DockStyle.Top, Height = 338 };
+        var card = new CardPanel { Dock = DockStyle.Top, Height = 342 };
         AddRows(card, header, _status, tiles, Gap(4), lampRow, Gap(10), _startButton);
         return card;
     }
 
-    private Control ScreenTileColumn(ColorTile tile, Label title, Label subtitle, Label hex)
+    private static Control ScreenTileColumn(ColorTile tile, Label title, Label subtitle, Label hex)
     {
         var caption = Columns(24, (title, 0), (hex, 70));
         hex.TextAlign = ContentAlignment.MiddleRight;
         subtitle.TextAlign = ContentAlignment.TopLeft;
         subtitle.Height = 18;
-        tile.AccessibleName = "螢幕";
         var column = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         AddRows(column, tile, Gap(4), caption, subtitle);
         return column;
     }
 
-    private Control LampTileColumn(ColorTile tile, string title, Label hex)
+    private Control LampTileColumn(ColorTile tile, Label title, Label hex)
     {
-        var caption = Columns(24, (MakeLabel(title, bold: true), 0), (hex, 70));
+        var caption = Columns(24, (title, 0), (hex, 70));
         hex.TextAlign = ContentAlignment.MiddleRight;
         var spacer = new Panel { Dock = DockStyle.Top, Height = 18 };
-        tile.AccessibleName = title;
+        _languageUpdaters.Add(() =>
+        {
+            var name = L10n.LampTile();
+            title.Text = name;
+            tile.AccessibleName = name;
+        });
         var column = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
         AddRows(column, tile, Gap(4), caption, spacer);
         return column;
@@ -199,98 +248,126 @@ internal sealed class MainForm : Form
 
     private Panel BuildColorPage()
     {
-        var sourceHeading = MakeLabel("取色來源", secondary: true, size: 8.5f);
+        var sourceHeading = MakeLabel(L10n.ColorSourceHeading(), secondary: true, size: 8.5f);
         sourceHeading.Dock = DockStyle.Top;
         sourceHeading.Height = 22;
+        _languageUpdaters.Add(() => sourceHeading.Text = L10n.ColorSourceHeading());
 
         var chips = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 38, WrapContents = false, Padding = Padding.Empty };
         foreach (var preset in ColorPreset.All)
         {
-            var chip = new PillButton(preset.Name, ButtonKind.Chip) { Height = 30, Margin = new Padding(0, 2, 6, 2) };
-            chip.Width = TextRenderer.MeasureText(preset.Name, Font).Width + 28;
+            var captured = preset;
+            var chip = new PillButton(L10n.PresetName(captured.Id), ButtonKind.Chip)
+            {
+                Height = 30,
+                Margin = new Padding(0, 2, 6, 2),
+                Tag = captured.Id,
+            };
+            chip.Width = TextRenderer.MeasureText(chip.Text, Font).Width + 24;
             chip.Click += (_, _) =>
             {
-                _controller.Apply(preset);
+                _controller.Apply(captured);
                 Render();
             };
+            _languageUpdaters.Add(() =>
+            {
+                chip.Text = L10n.PresetName(captured.Id);
+                chip.Width = TextRenderer.MeasureText(chip.Text, Font).Width + 24;
+            });
             _presetChips.Add(chip);
             chips.Controls.Add(chip);
         }
-        var heading = MakeLabel("風格預設", secondary: true, size: 8.5f);
+
+        var heading = MakeLabel(L10n.StylePresetsHeading(), secondary: true, size: 8.5f);
         heading.Dock = DockStyle.Top;
         heading.Height = 22;
-        var hint = MakeLabel("調整會立刻套用到手燈；點一下滑桿後可用方向鍵微調。", secondary: true, size: 8.5f);
+        _languageUpdaters.Add(() => heading.Text = L10n.StylePresetsHeading());
+
+        var hint = MakeLabel(L10n.ColorSliderHint(), secondary: true, size: 8.5f);
         hint.Dock = DockStyle.Top;
-        hint.Height = 26;
+        hint.Height = 32;
+        _languageUpdaters.Add(() => hint.Text = L10n.ColorSliderHint());
 
         _openSiteButton.Click += (_, _) => _controller.OpenAdoGuideSite();
 
         return Page(sourceHeading, _sourcePicker, Gap(6), _openSiteButton, Gap(8), Separator(), Gap(4), heading, chips, Gap(6),
-            Slider("鮮豔度", new ParamSlider("鮮豔度", 0, 1, 0.05, Percent), ColorPreset.Standard.Vibrance,
+            Slider(() => L10n.VibranceLabel(), new ParamSlider(L10n.VibranceLabel(), 0, 1, 0.05, Percent), ColorPreset.Standard.Vibrance,
                 () => _controller.Vibrance, v => _controller.Vibrance = v),
-            Slider("最低亮度", new ParamSlider("最低亮度", 0, 0.5, 0.05, v => v < 0.001 ? "關" : Percent(v)), ColorPreset.Standard.MinBrightness,
+            Slider(() => L10n.MinBrightnessLabel(), new ParamSlider(L10n.MinBrightnessLabel(), 0, 0.5, 0.05, v => v < 0.001 ? L10n.OffLabel() : Percent(v)), ColorPreset.Standard.MinBrightness,
                 () => _controller.MinBrightness, v => _controller.MinBrightness = v),
-            Slider("整體亮度", new ParamSlider("整體亮度", 0.1, 1, 0.05, Percent), ColorPreset.Standard.Brightness,
+            Slider(() => L10n.BrightnessLabel(), new ParamSlider(L10n.BrightnessLabel(), 0.1, 1, 0.05, Percent), ColorPreset.Standard.Brightness,
                 () => _controller.Brightness, v => _controller.Brightness = v),
-            Slider("色溫", new ParamSlider("色溫", -0.5, 0.5, 0.05, WarmthText), ColorPreset.Standard.Warmth,
+            Slider(() => L10n.WarmthLabel(), new ParamSlider(L10n.WarmthLabel(), -0.5, 0.5, 0.05, v => L10n.WarmthValue(v)), ColorPreset.Standard.Warmth,
                 () => _controller.Warmth, v => _controller.Warmth = v),
             Gap(6), hint);
     }
 
     private Panel BuildMotionPage()
     {
-        // One row of chips: "關" turns beat sync off (Tag null), each style turns it on with that style.
         var chips = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 38, WrapContents = false, Padding = Padding.Empty };
         foreach (var style in BeatStyles.Choices.Cast<BeatStyle?>().Prepend(null))
         {
-            var chip = new PillButton(style?.Name() ?? "關", ButtonKind.Chip) { Height = 30, Margin = new Padding(0, 2, 6, 2), Tag = style };
-            chip.Width = TextRenderer.MeasureText(chip.Text, Font).Width + 28;
+            var captured = style;
+            var text = captured is { } s ? L10n.BeatStyleName(s) : L10n.OffLabel();
+            var chip = new PillButton(text, ButtonKind.Chip) { Height = 30, Margin = new Padding(0, 2, 6, 2), Tag = captured };
+            chip.Width = TextRenderer.MeasureText(chip.Text, Font).Width + 24;
             chip.Click += (_, _) =>
             {
-                if (style is { } chosen) _controller.BeatStyle = chosen;
-                _controller.BeatSync = style != null;
+                if (captured is { } chosen) _controller.BeatStyle = chosen;
+                _controller.BeatSync = captured != null;
                 Render();
             };
+            _languageUpdaters.Add(() =>
+            {
+                chip.Text = captured is { } s2 ? L10n.BeatStyleName(s2) : L10n.OffLabel();
+                chip.Width = TextRenderer.MeasureText(chip.Text, Font).Width + 24;
+            });
             _beatStyleChips.Add(chip);
             chips.Controls.Add(chip);
         }
 
+        var beatTitle = MakeLabel(L10n.BeatSyncTitle());
+        _languageUpdaters.Add(() => beatTitle.Text = L10n.BeatSyncTitle());
+
         return Page(
-            LabeledRow("低延遲模式", MakeLabel("漸變最多 0.15 秒，燈光緊跟畫面", secondary: true, size: 8.5f), _lowLatency, 48),
-            Slider("漸變時間", _fade, 0.6, () => _controller.FadeTime, v => _controller.FadeTime = v),
+            LabeledRow(() => L10n.LowLatencyTitle(), () => L10n.LowLatencySubtitle(), _lowLatency, 48),
+            Slider(() => L10n.FadeTimeLabel(), _fade, 0.6, () => _controller.FadeTime, v => _controller.FadeTime = v),
             Separator(),
-            LabeledRow("換場快切", MakeLabel("畫面大幅換色時加快漸變", secondary: true, size: 8.5f), _sceneCuts, 48),
-            LabeledRow("呼吸律動", MakeLabel("沒有音樂時，顏色穩定就緩慢起伏", secondary: true, size: 8.5f), _breathing, 48),
+            LabeledRow(() => L10n.SceneCutsTitle(), () => L10n.SceneCutsSubtitle(), _sceneCuts, 48),
+            LabeledRow(() => L10n.BreathingTitle(), () => L10n.BreathingSubtitle(), _breathing, 48),
             Separator(),
-            Columns(30, (MakeLabel("跟音樂節拍"), 0), (_beatStatus, 200)),
+            Columns(30, (beatTitle, 0), (_beatStatus, 210)),
             chips, _beatStyleSummary);
     }
 
     private Panel BuildRegionPage()
     {
-        var noticeBox = new TintPanel { Dock = DockStyle.Top, Padding = new Padding(12, 10, 12, 10) };
-        var noticeLabel = MakeLabel("網站模式不需要框選。顏色與拍點直接來自 Ado 應援預習網站。", secondary: true);
+        var noticeBox = new TintPanel { Dock = DockStyle.Top, Height = 104, Padding = new Padding(12, 10, 12, 10) };
+        var noticeLabel = MakeLabel(L10n.RegionSiteNotice(), secondary: true);
         noticeLabel.Dock = DockStyle.Top;
-        noticeLabel.Height = 36;
-        noticeBox.Controls.Add(noticeLabel);
+        noticeLabel.Height = 44;
+        _languageUpdaters.Add(() => noticeLabel.Text = L10n.RegionSiteNotice());
 
-        var regionSiteButton = new PillButton("開啟 Ado 應援預習網站 ↗", ButtonKind.Chip) { Height = 28, Margin = new Padding(0, 4, 0, 0) };
-        regionSiteButton.Click += (_, _) => _controller.OpenAdoGuideSite();
-        noticeBox.Controls.Add(regionSiteButton);
+        var siteButtonRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34, WrapContents = false, Padding = Padding.Empty, Margin = Padding.Empty };
+        _regionSiteButton.Margin = new Padding(0, 2, 0, 2);
+        _regionSiteButton.Click += (_, _) => _controller.OpenAdoGuideSite();
+        siteButtonRow.Controls.Add(_regionSiteButton);
+
+        AddRows(noticeBox, noticeLabel, Gap(4), siteButtonRow);
 
         _siteRegionNotice.Controls.Add(noticeBox);
-        _siteRegionNotice.Height = 88;
+        _siteRegionNotice.Height = 124;
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40, WrapContents = false };
         _regionButton.Margin = new Padding(0, 4, 8, 4);
         _wholeScreenButton.Margin = new Padding(0, 4, 0, 4);
         buttons.Controls.Add(_regionButton);
         buttons.Controls.Add(_wholeScreenButton);
-        var hint = MakeLabel("影片沒有全螢幕時，框選影片所在區域可讓顏色更準。範圍固定在螢幕上的位置，移動影片視窗後請重新框選。",
-            secondary: true, size: 8.5f);
+        var hint = MakeLabel(L10n.RegionHint(), secondary: true, size: 8.5f);
         hint.Dock = DockStyle.Top;
-        hint.Height = 46;
+        hint.Height = 54;
         hint.TextAlign = ContentAlignment.TopLeft;
+        _languageUpdaters.Add(() => hint.Text = L10n.RegionHint());
 
         AddRows(_screenRegionPanel, _regionPreview, Gap(8), _regionLabel, buttons, Gap(4), hint);
         _screenRegionPanel.Height = _regionPreview.Height + 8 + _regionLabel.Height + buttons.Height + 4 + hint.Height;
@@ -301,24 +378,29 @@ internal sealed class MainForm : Form
 
     private Panel BuildGeneralPage()
     {
-        var logRow = LabeledRow("執行記錄", MakeLabel("連線、錯誤與延遲紀錄", secondary: true, size: 8.5f), _logButton, 120);
-        var resetRow = LabeledRow("恢復預設效果", MakeLabel("色彩與動態全部恢復預設，手燈與範圍不變", secondary: true, size: 8.5f), _resetButton, 104);
+        var languageRow = LabeledRow(() => L10n.LanguageTitle(), () => L10n.LanguageSubtitle(), _languageButton, 165);
+        var updateRow = LabeledRow(() => L10n.CheckUpdatesTitle(), () => L10n.CurrentVersionSubtitle(_updates.CurrentVersion), _checkOnLaunch, 48);
+        var logRow = LabeledRow(() => L10n.LogTitle(), () => L10n.LogSubtitle(), _logButton, 132);
+        var resetRow = LabeledRow(() => L10n.ResetTitle(), () => L10n.ResetSubtitle(), _resetButton, 122);
         return Page(
-            LabeledRow("啟動時檢查更新", MakeLabel($"目前版本 v{_updates.CurrentVersion}", secondary: true, size: 8.5f), _checkOnLaunch, 48),
-            Columns(38, (_updateNote, 0), (_checkUpdatesButton, 100)),
+            languageRow,
+            Separator(),
+            updateRow,
+            Columns(38, (_updateNote, 0), (_checkUpdatesButton, 118)),
             Separator(),
             logRow, _log,
             Separator(),
             resetRow);
     }
 
-    private Control Slider(string title, ParamSlider slider, double defaultValue, Func<double> read, Action<double> write)
+    private Control Slider(Func<string> getTitle, ParamSlider slider, double defaultValue, Func<double> read, Action<double> write)
     {
         slider.Dock = DockStyle.Fill;
         slider.Margin = new Padding(4, 3, 4, 3);
+        var titleLabel = MakeLabel(getTitle());
         var value = MakeLabel("", size: 9.5f);
         value.TextAlign = ContentAlignment.MiddleRight;
-        var reset = new PillButton("↺") { Dock = DockStyle.Fill, Margin = new Padding(4, 4, 0, 4), AccessibleName = $"將{title}恢復預設值" };
+        var reset = new PillButton("↺") { Dock = DockStyle.Fill, Margin = new Padding(4, 4, 0, 4), AccessibleName = L10n.ResetSliderAccessibility(getTitle()) };
         slider.ValueChanged += (_, _) =>
         {
             write(slider.Value);
@@ -329,23 +411,36 @@ internal sealed class MainForm : Form
             write(defaultValue);
             Render();
         };
+        _languageUpdaters.Add(() =>
+        {
+            var title = getTitle();
+            titleLabel.Text = title;
+            slider.AccessibleName = title;
+            reset.AccessibleName = L10n.ResetSliderAccessibility(title);
+        });
         _sliderRows.Add(new SliderRow(slider, value, reset, defaultValue, read));
-        return Columns(36, (MakeLabel(title), 76), (slider, 0), (value, 58), (reset, 32));
+        return Columns(36, (titleLabel, 112), (slider, 0), (value, 70), (reset, 32));
     }
 
     /// <summary>Title with a smaller subtitle on the left and a control on the right.</summary>
-    private Control LabeledRow(string title, Label subtitle, Control trailing, int trailingWidth)
+    private Control LabeledRow(Func<string> getTitle, Func<string> getSubtitle, Control trailing, int trailingWidth)
     {
-        var row = new TableLayoutPanel { Dock = DockStyle.Top, Height = 50, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
+        var row = new TableLayoutPanel { Dock = DockStyle.Top, Height = 52, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, trailingWidth));
-        row.RowStyles.Add(new RowStyle(SizeType.Percent, 54));
-        row.RowStyles.Add(new RowStyle(SizeType.Percent, 46));
-        var titleLabel = MakeLabel(title);
+        row.RowStyles.Add(new RowStyle(SizeType.Percent, 52));
+        row.RowStyles.Add(new RowStyle(SizeType.Percent, 48));
+        var titleLabel = MakeLabel(getTitle());
         titleLabel.TextAlign = ContentAlignment.BottomLeft;
-        subtitle.TextAlign = ContentAlignment.TopLeft;
+        var subtitleLabel = MakeLabel(getSubtitle(), secondary: true, size: 8.5f);
+        subtitleLabel.TextAlign = ContentAlignment.TopLeft;
+        _languageUpdaters.Add(() =>
+        {
+            titleLabel.Text = getTitle();
+            subtitleLabel.Text = getSubtitle();
+        });
         row.Controls.Add(titleLabel, 0, 0);
-        row.Controls.Add(subtitle, 0, 1);
+        row.Controls.Add(subtitleLabel, 0, 1);
         trailing.Anchor = trailing is ToggleSwitch ? AnchorStyles.Right : AnchorStyles.Left | AnchorStyles.Right;
         if (trailing is PillButton) trailing.Margin = new Padding(0, 9, 0, 9);
         row.Controls.Add(trailing, 1, 0);
@@ -412,17 +507,12 @@ internal sealed class MainForm : Form
 
     private static string Percent(double value) => $"{Math.Round(value * 100):0}%";
 
-    private static string WarmthText(double value)
-    {
-        var amount = (int)Math.Round(Math.Abs(value) * 100);
-        return amount == 0 ? "中性" : value > 0 ? $"暖 {amount}" : $"冷 {amount}";
-    }
-
     // MARK: - Events
 
     private void WireEvents()
     {
         _controller.Changed += Render;
+        L10n.LanguageChanged += OnLanguageChanged;
         _sourcePicker.SelectedIndexChanged += (_, _) =>
         {
             _controller.ColorSource = _sourcePicker.SelectedIndex == 1 ? ColorSource.Site : ColorSource.Screen;
@@ -444,18 +534,18 @@ internal sealed class MainForm : Form
         _logButton.Click += (_, _) =>
         {
             _log.Visible = !_log.Visible;
-            _logButton.Text = _log.Visible ? "隱藏記錄 ▴" : "顯示記錄 ▾";
+            _logButton.Text = L10n.LogToggleButton(_log.Visible);
             _generalPage.Height += _log.Visible ? _log.Height : -_log.Height;
             Render();
         };
         _resetButton.Click += (_, _) =>
         {
-            var reset = new TaskDialogButton("全部重設");
+            var reset = new TaskDialogButton(L10n.ResetButton());
             var page = new TaskDialogPage
             {
                 Caption = Text,
-                Heading = "要把色彩與動態設定全部恢復預設嗎？",
-                Text = "手燈與取色範圍不會改變。",
+                Heading = L10n.ResetConfirmHeading(),
+                Text = L10n.ResetConfirmText(),
                 Icon = TaskDialogIcon.Warning,
                 Buttons = { reset, TaskDialogButton.Cancel },
                 DefaultButton = TaskDialogButton.Cancel,
@@ -463,6 +553,24 @@ internal sealed class MainForm : Form
             if (TaskDialog.ShowDialog(this, page) != reset) return;
             _controller.ResetEffects();
             Render();
+        };
+        _languageButton.Click += (_, _) =>
+        {
+            _languageMenu.Items.Clear();
+            foreach (var pref in new[] { LanguagePreference.Auto, LanguagePreference.ZhHant, LanguagePreference.En, LanguagePreference.Ja })
+            {
+                var captured = pref;
+                var item = new ToolStripMenuItem(L10n.LanguageOptionName(captured))
+                {
+                    Checked = captured == _controller.LanguagePreference,
+                };
+                item.Click += (_, _) =>
+                {
+                    _controller.LanguagePreference = captured;
+                };
+                _languageMenu.Items.Add(item);
+            }
+            _languageMenu.Show(_languageButton, new Point(0, _languageButton.Height));
         };
         _regionButton.Click += (_, _) =>
         {
@@ -518,8 +626,27 @@ internal sealed class MainForm : Form
             if (_updates.CheckOnLaunch) await CheckForUpdatesAsync(manual: false);
         };
         FormClosing += (_, _) => _controller.Dispose();
-        FormClosed += (_, _) => SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        FormClosed += (_, _) =>
+        {
+            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            L10n.LanguageChanged -= OnLanguageChanged;
+        };
         AcceptButton = _startButton;
+    }
+
+    private void OnLanguageChanged()
+    {
+        if (!IsHandleCreated) return;
+        BeginInvoke((Action)(() =>
+        {
+            ApplyLanguage();
+            Render();
+        }));
+    }
+
+    private void ApplyLanguage()
+    {
+        foreach (var update in _languageUpdaters) update();
     }
 
     private void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
@@ -573,16 +700,14 @@ internal sealed class MainForm : Form
         var isSite = _controller.ColorSource == ColorSource.Site;
         if (isSite)
         {
-            _screenTitle.Text = "網站顏色 ↗";
-            _screenTile.AccessibleName = "網站顏色";
-            _screenSubtitle.Text = string.IsNullOrEmpty(_controller.SiteSongTitle)
-                ? _controller.SitePlayingState
-                : $"〈{_controller.SiteSongTitle}〉{_controller.SitePlayingState}";
+            _screenTitle.Text = L10n.SiteColorTileTitle();
+            _screenTile.AccessibleName = L10n.SiteColorAccessibleName();
+            _screenSubtitle.Text = L10n.SiteSongCaption(_controller.SiteSongTitle, _controller.SitePlayingState);
         }
         else
         {
-            _screenTitle.Text = "螢幕";
-            _screenTile.AccessibleName = "螢幕";
+            _screenTitle.Text = L10n.ScreenTile();
+            _screenTile.AccessibleName = L10n.ScreenTile();
             _screenSubtitle.Text = "";
         }
         _screenTile.Cursor = isSite ? Cursors.Hand : Cursors.Default;
@@ -590,33 +715,27 @@ internal sealed class MainForm : Form
         _screenSubtitle.Cursor = isSite ? Cursors.Hand : Cursors.Default;
         _sourcePicker.SelectedIndex = isSite ? 1 : 0;
         _openSiteButton.Visible = isSite;
-        _openSiteButton.Text = string.IsNullOrEmpty(_controller.SiteSongTitle)
-            ? "開啟 Ado 應援預習網站 ↗"
-            : $"在網站開啟〈{_controller.SiteSongTitle}〉 ↗";
-        _openSiteButton.Width = TextRenderer.MeasureText(_openSiteButton.Text, Font).Width + 28;
+        var openSiteText = L10n.OpenSiteButton(_controller.SiteSongTitle);
+        _openSiteButton.Text = openSiteText;
+        _openSiteButton.Width = TextRenderer.MeasureText(openSiteText, Font).Width + 28;
+        _regionSiteButton.Text = openSiteText;
+        _regionSiteButton.Width = TextRenderer.MeasureText(openSiteText, Font).Width + 28;
 
         var failed = _controller.ErrorMessage != null;
-        var (pill, tone) = _controller.Phase switch
-        {
-            Phase.Connecting => ("連線中", Theme.Warning),
-            Phase.Syncing => ("連動中", Theme.Success),
-            Phase.Reconnecting => ("重新連線中", Theme.Warning),
-            Phase.Stopping => ("停止中", Theme.Warning),
-            _ => failed ? ("已停止", Theme.Danger) : ("待機", Theme.SecondaryText),
-        };
+        var (pill, tone) = L10n.StatusPill(_controller.Phase, failed);
         _statusPill.Show(pill, tone);
         _status.Text = _controller.Status;
         _latency.Text = _controller.LatencySummary ?? "";
 
         var idle = _controller.Phase == Phase.Idle;
         var selected = _controller.Lamps.FirstOrDefault(l => l.Address == _controller.SelectedAddress);
-        _lampButton.Text = _controller.Lamps.Count == 0 ? "尚未找到手燈，請按「掃描」"
-            : selected != null ? $"{LampLabel(selected)}  ▾" : "選擇手燈  ▾";
+        _lampButton.Text = _controller.Lamps.Count == 0 ? L10n.NoLampFoundHint()
+            : selected != null ? $"{LampLabel(selected)}  ▾" : L10n.SelectLampPrompt();
         _lampButton.Enabled = idle && _controller.Lamps.Count > 0;
-        _scanButton.Text = _controller.IsScanning ? "停止掃描" : "↻ 掃描";
+        _scanButton.Text = L10n.ScanButton(_controller.IsScanning);
         _scanButton.Enabled = _controller.BluetoothReady && idle;
         _startButton.Kind = idle ? ButtonKind.Primary : ButtonKind.Danger;
-        _startButton.Text = idle ? "▶  開始連動" : "■  停止連動";
+        _startButton.Text = idle ? L10n.StartSyncButton() : L10n.StopSyncButton();
         _startButton.Enabled = idle ? _controller.CanStart : _controller.Phase != Phase.Stopping;
 
         _error.Text = _controller.ErrorMessage ?? "";
@@ -629,7 +748,8 @@ internal sealed class MainForm : Form
             row.Reset.Visible = Math.Abs(row.Slider.Value - row.Default) >= row.Slider.Step / 2;
         }
         var active = _controller.ActivePreset;
-        foreach (var chip in _presetChips) chip.Selected = active?.Name == chip.Text;
+        foreach (var chip in _presetChips)
+            chip.Selected = chip.Tag is ColorPresetId id && active?.Id == id;
         _fade.Enabled = !_controller.LowLatency;
         _lowLatency.Checked = _controller.LowLatency;
         _sceneCuts.Checked = _controller.SceneCuts;
@@ -639,25 +759,26 @@ internal sealed class MainForm : Form
         if (isSite)
         {
             _beatStatus.Text = _controller.Bpm is { } siteBpm && siteBpm > 0
-                ? $"{siteBpm} BPM（網站節拍）"
-                : "等待網站節拍…";
+                ? L10n.MusicStatusSiteBpm(siteBpm)
+                : L10n.MusicStatusSiteWaiting();
             _beatStatus.ForeColor = _controller.Bpm is > 0 ? Theme.Success : Theme.SecondaryText;
         }
         else
         {
             _beatStatus.Text = !_controller.BeatSync ? ""
-                : !_controller.MusicDetected ? "等待音樂…"
-                : (_controller.Bpm is { } bpm ? $"偵測到 {bpm} BPM" : "偵測到節拍")
-                    + (_controller.BeatStyle == BeatStyle.Auto && _controller.ActiveBeatStyle is { } picked ? $"・{picked.Name()}" : "");
+                : !_controller.MusicDetected ? L10n.MusicStatusWaitingMusic()
+                : L10n.MusicStatusDetected(_controller.Bpm, _controller.ActiveBeatStyle, _controller.BeatStyle == BeatStyle.Auto);
             _beatStatus.ForeColor = _controller.MusicDetected ? Theme.Success : Theme.SecondaryText;
         }
         foreach (var chip in _beatStyleChips)
             chip.Selected = chip.Tag is BeatStyle style ? _controller.BeatSync && style == _controller.BeatStyle : !_controller.BeatSync;
-        _beatStyleSummary.Text = isSite ? "由網站自動同步歌曲拍點與高潮閃爍"
-            : _controller.BeatSync ? _controller.BeatStyle.Summary() : "只跟畫面顏色，不聽音樂";
+        _beatStyleSummary.Text = isSite ? L10n.BeatSummarySite()
+            : _controller.BeatSync ? L10n.BeatStyleSummary(_controller.BeatStyle) : L10n.BeatSummaryOff();
 
         _regionPreview.Area = _controller.Region;
-        _regionLabel.Text = _controller.Region is { } region ? $"目前：框選範圍（寬 {region.Width * 100:0}%、高 {region.Height * 100:0}%）" : "目前：整個主螢幕";
+        _regionLabel.Text = _controller.Region is { } region
+            ? L10n.RegionCustomDesc(region.Width * 100, region.Height * 100)
+            : L10n.RegionWholeScreenDesc();
         _wholeScreenButton.Visible = _controller.Region != null;
 
         _siteRegionNotice.Visible = isSite;
@@ -680,32 +801,51 @@ internal sealed class MainForm : Form
 
     private static string LampLabel(LampInfo lamp)
     {
-        var detail = lamp.Rssi is { } rssi ? $"{rssi} dBm" : lamp.Remembered ? "上次使用" : "";
+        var detail = lamp.Rssi is { } rssi ? $"{rssi} dBm" : lamp.Remembered ? L10n.LampLastUsed() : "";
         return $"{PenlightProtocol.TargetName} · {lamp.AddressText}" + (detail.Length > 0 ? $" · {detail}" : "");
     }
 
     // MARK: - Updates
+
+    private void SetUpdateNote(UpdateNoteKind kind, string? arg = null)
+    {
+        _updateNoteKind = kind;
+        _updateNoteArg = arg;
+        RefreshUpdateNote();
+    }
+
+    private void RefreshUpdateNote()
+    {
+        _updateNote.Text = _updateNoteKind switch
+        {
+            UpdateNoteKind.Checking => L10n.UpdateChecking(),
+            UpdateNoteKind.NewVersion when _updateNoteArg != null => L10n.UpdateNewVersion(_updateNoteArg),
+            UpdateNoteKind.UpToDate => L10n.UpdateLatest(_updates.CurrentVersion),
+            UpdateNoteKind.Failed => L10n.UpdateFailed(),
+            _ => L10n.UpdateDefaultNote(),
+        };
+    }
 
     /// <summary>A launch check stays silent unless there is a version the user has not skipped; a manual check always reports.</summary>
     private async Task CheckForUpdatesAsync(bool manual)
     {
         if (!_checkUpdatesButton.Enabled) return;
         _checkUpdatesButton.Enabled = false;
-        if (manual) _updateNote.Text = "正在檢查…";
+        if (manual) SetUpdateNote(UpdateNoteKind.Checking);
         try
         {
             var newer = await _updates.FindNewerAsync();
             if (newer == null)
             {
-                if (manual) _updateNote.Text = $"已是最新版（v{_updates.CurrentVersion}）";
+                if (manual) SetUpdateNote(UpdateNoteKind.UpToDate);
                 return;
             }
-            _updateNote.Text = $"有新版本 {newer}";
+            SetUpdateNote(UpdateNoteKind.NewVersion, newer);
             if (manual || !_updates.IsSkipped(newer)) OfferUpdate(newer);
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
         {
-            if (manual) _updateNote.Text = "無法檢查更新，請確認網路連線。";
+            if (manual) SetUpdateNote(UpdateNoteKind.Failed);
         }
         finally
         {
@@ -715,14 +855,14 @@ internal sealed class MainForm : Form
 
     private void OfferUpdate(string version)
     {
-        var download = new TaskDialogButton("前往下載");
-        var skip = new TaskDialogButton("略過這個版本");
-        var later = new TaskDialogButton("稍後");
+        var download = new TaskDialogButton(L10n.UpdateDownloadButton());
+        var skip = new TaskDialogButton(L10n.UpdateSkipButton());
+        var later = new TaskDialogButton(L10n.UpdateLaterButton());
         var page = new TaskDialogPage
         {
             Caption = Text,
-            Heading = $"有新版本 {version}",
-            Text = $"目前是 v{_updates.CurrentVersion}。下載新版後解壓縮，取代舊的 PenlightSync.exe 即可。",
+            Heading = L10n.UpdateAlertTitle(version),
+            Text = L10n.UpdateAlertMessageWin(_updates.CurrentVersion),
             Icon = TaskDialogIcon.Information,
             Buttons = { download, skip, later },
             DefaultButton = download,

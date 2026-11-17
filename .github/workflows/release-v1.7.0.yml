@@ -1,4 +1,4 @@
-name: Release v1.7.1
+name: Release v1.8.0
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-macos:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.7.1]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.8.0]') }}
     runs-on: macos-latest
     steps:
       - name: Check out source
@@ -45,7 +45,7 @@ jobs:
           retention-days: 1
 
   build-windows:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.7.1]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.8.0]') }}
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -72,7 +72,7 @@ jobs:
           retention-days: 1
 
   publish-release:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.7.1]') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[release-v1.8.0]') }}
     needs:
       - build-macos
       - build-windows
@@ -93,15 +93,22 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.7.1
+          tag_name: v1.8.0
           target_commitish: ${{ github.sha }}
-          name: 'v1.7.1：網站連動模式、音樂節拍與 BPM 自動燈光效果'
+          name: 'v1.8.0：多語系（繁體中文／English／日本語）與架構最佳化'
           draft: false
           prerelease: false
           make_latest: true
           body: |
-            ## 修復 / Fixed 
-            --更換網址後導致的手燈連動失靈。
+            ## 新功能 / Features / 新機能
+            - 新增多語系支援（繁體中文／English／日本語），預設跟隨系統語言，並可在「一般」分頁即時切換。
+            - Added i18n support (Traditional Chinese / English / Japanese) with system locale detection and live switching in the General tab.
+            - 多言語対応（繁體字中国語／English／日本語）を追加し、システム言語への自動追従と「一般」タブでの即時切り替えに対応。
+
+            ## 改進與修正 / Improvements & Fixes
+            - 抽出網站模式舞台演出核心 `SiteStageDirector` 與偏好持久化 `SettingsStore`，並補齊單元測試。
+            - 修正 Windows 版網站模式執行緒安全、背景取樣空轉與取色範圍提示版面重疊問題。
+            - 對齊 Mac／Windows `SiteLink` 的 `localhost` Origin 驗證與握手檢查。
           files: |
             release-assets/PenlightSync-macOS.zip
             release-assets/PenlightSync-Windows-x64.zip

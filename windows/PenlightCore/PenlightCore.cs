@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 
 namespace PenlightSync.Core;
@@ -450,16 +451,25 @@ public sealed class BeatDetector
     }
 }
 
+public enum ColorPresetId
+{
+    Natural,
+    Standard,
+    Vivid,
+    Concert,
+    Cinema
+}
+
 /// <summary>Port of ColorPreset in LightEngine.swift: one-click combinations of the color settings.</summary>
-public sealed record ColorPreset(string Name, double Vibrance, double MinBrightness, double Brightness, double Warmth)
+public sealed record ColorPreset(ColorPresetId Id, string Name, double Vibrance, double MinBrightness, double Brightness, double Warmth)
 {
     public static readonly IReadOnlyList<ColorPreset> All = new[]
     {
-        new ColorPreset("自然", 0.2, 0, 1, 0),
-        new ColorPreset("標準", 0.4, 0, 1, 0),
-        new ColorPreset("鮮豔", 0.75, 0.1, 1, 0),
-        new ColorPreset("演唱會", 0.9, 0.2, 1, -0.1),
-        new ColorPreset("電影院", 0.3, 0.05, 0.7, 0.15),
+        new ColorPreset(ColorPresetId.Natural, "自然", 0.2, 0, 1, 0),
+        new ColorPreset(ColorPresetId.Standard, "標準", 0.4, 0, 1, 0),
+        new ColorPreset(ColorPresetId.Vivid, "鮮豔", 0.75, 0.1, 1, 0),
+        new ColorPreset(ColorPresetId.Concert, "演唱會", 0.9, 0.2, 1, -0.1),
+        new ColorPreset(ColorPresetId.Cinema, "電影院", 0.3, 0.05, 0.7, 0.15),
     };
 
     /// <summary>The defaults a fresh install starts with.</summary>
@@ -468,6 +478,57 @@ public sealed record ColorPreset(string Name, double Vibrance, double MinBrightn
     public bool Matches(double vibrance, double minBrightness, double brightness, double warmth) =>
         Math.Abs(Vibrance - vibrance) < 0.001 && Math.Abs(MinBrightness - minBrightness) < 0.001
         && Math.Abs(Brightness - brightness) < 0.001 && Math.Abs(Warmth - warmth) < 0.001;
+}
+
+public enum LanguagePreference
+{
+    Auto,
+    ZhHant,
+    En,
+    Ja
+}
+
+public enum AppLanguage
+{
+    ZhHant,
+    En,
+    Ja
+}
+
+public static class LanguageResolver
+{
+    public static LanguagePreference ParsePreference(string? value) => value?.Trim() switch
+    {
+        "zh-Hant" => LanguagePreference.ZhHant,
+        "en" => LanguagePreference.En,
+        "ja" => LanguagePreference.Ja,
+        _ => LanguagePreference.Auto,
+    };
+
+    public static string ToConfigString(LanguagePreference preference) => preference switch
+    {
+        LanguagePreference.ZhHant => "zh-Hant",
+        LanguagePreference.En => "en",
+        LanguagePreference.Ja => "ja",
+        _ => "auto",
+    };
+
+    public static AppLanguage Detect(string? cultureName)
+    {
+        if (string.IsNullOrWhiteSpace(cultureName)) return AppLanguage.En;
+        var lower = cultureName.Trim().ToLowerInvariant();
+        if (lower.StartsWith("ja")) return AppLanguage.Ja;
+        if (lower.StartsWith("zh")) return AppLanguage.ZhHant;
+        return AppLanguage.En;
+    }
+
+    public static AppLanguage Resolve(LanguagePreference preference, CultureInfo? uiCulture = null) => preference switch
+    {
+        LanguagePreference.ZhHant => AppLanguage.ZhHant,
+        LanguagePreference.En => AppLanguage.En,
+        LanguagePreference.Ja => AppLanguage.Ja,
+        _ => Detect((uiCulture ?? CultureInfo.CurrentUICulture).Name),
+    };
 }
 
 /// <summary>Port of ReleaseVersion in PenlightApp/UpdateChecker.swift: release tags such as "v1.4.0", compared part by part.</summary>
@@ -507,6 +568,13 @@ public enum ColorSource
 {
     Screen,
     Site
+}
+
+public enum SitePlayingState
+{
+    Waiting,
+    Playing,
+    Paused
 }
 
 public sealed record SiteBeat(double Bpm, double Offset, bool BarKnown);
@@ -881,4 +949,189 @@ public sealed class SiteLightEvaluator
             IsPreDownbeat: isPreDownbeat
         );
     }
+}
+
+public readonly record struct SiteStageOutput(
+    Rgb EffectiveColor,
+    double EffectiveBrightness,
+    double EffectiveFadeTime,
+    double BeatDepth,
+    bool BeatSync,
+    BeatStyle BeatStyle,
+    bool Breathing,
+    double? BeatStrength,
+    double BeatBpm,
+    SitePlayingState PlayingState,
+    string SongTitle);
+
+/// <summary>Port of SiteStageDirector in SiteLight.swift: concert stage effects for Website Mode.</summary>
+public sealed class SiteStageDirector
+{
+    private readonly Func<double> _nextRandom;
+    private double _blinderUntil = double.NegativeInfinity;
+    private (int r, int g, int b) _colorJitter;
+    private double _accentUntil = double.NegativeInfinity;
+    private Rgb? _accentColor;
+
+    public SiteStageDirector(Func<double>? nextRandom = null)
+    {
+        _nextRandom = nextRandom ?? (() => Random.Shared.NextDouble());
+    }
+
+    public void Reset()
+    {
+        _blinderUntil = double.NegativeInfinity;
+        _colorJitter = (0, 0, 0);
+        _accentUntil = double.NegativeInfinity;
+        _accentColor = null;
+    }
+
+    public SiteStageOutput Step(
+        double uptimeSeconds,
+        DateTime now,
+        double baseBrightness,
+        double effectiveFadeTime,
+        bool lowLatency,
+        BeatStyle userBeatStyle,
+        SiteLightEvaluator evaluator)
+    {
+        var frame = evaluator.Evaluate(now, userBeatStyle);
+        var songTitle = evaluator.LatestState?.Title ?? "";
+        var playingState = frame.IsWaiting
+            ? SitePlayingState.Waiting
+            : evaluator.LatestState?.Playing == true ? SitePlayingState.Playing : SitePlayingState.Paused;
+
+        var stageBrightness = baseBrightness * (frame.IsPreDownbeat ? 0.28 : frame.BrightnessMultiplier);
+        var stageFadeTime = lowLatency ? 0.10 : Math.Min(effectiveFadeTime, 0.20);
+        const double stageBeatDepth = 0.65;
+
+        var isPlaying = evaluator.LatestState?.Playing == true && !frame.IsWaiting;
+        var isListen = evaluator.LatestState?.Cue == "listen";
+        var hasBeat = isPlaying && !isListen && frame.BeatBpm > 0;
+
+        BeatStyle stageBeatStyle;
+        bool stageBeatSync;
+        bool stageBreathing;
+        if (frame.IsClimax)
+        {
+            stageBeatStyle = BeatStyle.Blink;
+            stageBeatSync = true;
+            stageBreathing = false;
+        }
+        else if (hasBeat)
+        {
+            stageBeatStyle = (userBeatStyle == BeatStyle.Auto || userBeatStyle == BeatStyle.Colors)
+                ? BeatStyle.Flash
+                : userBeatStyle;
+            stageBeatSync = true;
+            stageBreathing = false;
+        }
+        else if (isPlaying)
+        {
+            stageBeatStyle = BeatStyle.Flash;
+            stageBeatSync = false;
+            stageBreathing = true;
+        }
+        else
+        {
+            stageBeatStyle = BeatStyle.Flash;
+            stageBeatSync = false;
+            stageBreathing = false;
+        }
+
+        double? triggerStrength = null;
+        if (frame.ShouldBeat)
+        {
+            double strength;
+            if (frame.IsBarStart)
+            {
+                strength = 1.00;
+                if (frame.BeatBpm >= 100)
+                {
+                    _blinderUntil = uptimeSeconds + 0.08;
+                }
+            }
+            else if (frame.BeatInBar == 2)
+            {
+                strength = 0.70 + ClampedUnit() * 0.10;
+            }
+            else if (frame.BeatInBar == 3 && frame.BeatBpm >= 115)
+            {
+                strength = 0.65 + ClampedUnit() * 0.13;
+            }
+            else
+            {
+                strength = 0.45 + ClampedUnit() * 0.10;
+            }
+            triggerStrength = strength;
+
+            _colorJitter = (
+                RandomChannelOffset(),
+                RandomChannelOffset(),
+                RandomChannelOffset()
+            );
+
+            var colorsCount = evaluator.LatestState?.Colors.Length ?? 0;
+            if (colorsCount <= 1 && frame.BeatBpm >= 115)
+            {
+                if ((frame.BeatInBar == 2 || frame.IsBarStart) && ClampedUnit() < 0.22)
+                {
+                    var baseCol = frame.TargetColor;
+                    if (baseCol.Red > 180 && baseCol.Blue < 120)
+                    {
+                        _accentColor = new Rgb(255, 175, 60);
+                        _accentUntil = uptimeSeconds + 0.12;
+                    }
+                    else if (baseCol.Blue > 180 && baseCol.Red < 120)
+                    {
+                        _accentColor = new Rgb(60, 220, 210);
+                        _accentUntil = uptimeSeconds + 0.12;
+                    }
+                    else if (baseCol.Red > 140 && baseCol.Blue > 140)
+                    {
+                        _accentColor = new Rgb(255, 90, 180);
+                        _accentUntil = uptimeSeconds + 0.12;
+                    }
+                }
+            }
+        }
+
+        var effectiveColor = frame.TargetColor;
+        if (uptimeSeconds < _blinderUntil)
+        {
+            const double whiteFactor = 0.86;
+            var r = (byte)Math.Min(255, (int)(effectiveColor.Red * (1.0 - whiteFactor) + 255.0 * whiteFactor));
+            var g = (byte)Math.Min(255, (int)(effectiveColor.Green * (1.0 - whiteFactor) + 255.0 * whiteFactor));
+            var b = (byte)Math.Min(255, (int)(effectiveColor.Blue * (1.0 - whiteFactor) + 255.0 * whiteFactor));
+            effectiveColor = new Rgb(r, g, b);
+        }
+        else if (uptimeSeconds < _accentUntil && _accentColor is { } accent)
+        {
+            effectiveColor = accent;
+        }
+        else if (hasBeat)
+        {
+            var r = (byte)Math.Clamp(effectiveColor.Red + _colorJitter.r, 0, 255);
+            var g = (byte)Math.Clamp(effectiveColor.Green + _colorJitter.g, 0, 255);
+            var b = (byte)Math.Clamp(effectiveColor.Blue + _colorJitter.b, 0, 255);
+            effectiveColor = new Rgb(r, g, b);
+        }
+
+        return new SiteStageOutput(
+            EffectiveColor: effectiveColor,
+            EffectiveBrightness: stageBrightness,
+            EffectiveFadeTime: stageFadeTime,
+            BeatDepth: stageBeatDepth,
+            BeatSync: stageBeatSync,
+            BeatStyle: stageBeatStyle,
+            Breathing: stageBreathing,
+            BeatStrength: triggerStrength,
+            BeatBpm: frame.BeatBpm,
+            PlayingState: playingState,
+            SongTitle: songTitle);
+    }
+
+    private double ClampedUnit() => Math.Clamp(_nextRandom(), 0.0, 1.0);
+
+    private int RandomChannelOffset() => Math.Clamp((int)Math.Floor(ClampedUnit() * 17.0), 0, 16) - 8;
 }

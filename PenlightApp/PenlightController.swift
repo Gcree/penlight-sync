@@ -5,37 +5,11 @@ import Foundation
 
 private let targetName = "Ado Light Stick"
 private let controlUUID = CBUUID(string: "0000")
-private let selectedLampKey = "selectedLampID"
-private let colorSourceKey = "colorSource"
-private let fadeTimeKey = "fadeTime"
-private let breathingKey = "breathing"
-private let vibranceKey = "vibrance"
-private let minBrightnessKey = "minBrightness"
-private let warmthKey = "warmth"
-private let brightnessKey = "brightness"
-private let sceneCutsKey = "sceneCuts"
-private let beatSyncKey = "beatSync"
-private let beatStyleKey = "beatStyle"
-private let captureRegionKey = "captureRegion"
-private let lowLatencyKey = "lowLatency"
 
 struct DiscoveredLamp: Identifiable, Equatable {
     let id: UUID
     var rssi: Int?
     var remembered: Bool
-}
-
-enum ColorSource: String, CaseIterable, Identifiable {
-    case screen = "screen"
-    case site = "site"
-
-    var id: String { rawValue }
-    var displayName: String {
-        switch self {
-        case .screen: return "螢幕"
-        case .site: return "網站（Ado 應援預習）"
-        }
-    }
 }
 
 /// GUI counterpart of the CLI's BLESession: same target checks, write-with-response and watchdogs,
@@ -68,48 +42,48 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published private(set) var isScanning = false
     @Published private(set) var lamps: [DiscoveredLamp] = []
     @Published var selectedLampID: UUID? {
-        didSet { UserDefaults.standard.set(selectedLampID?.uuidString, forKey: selectedLampKey) }
+        didSet { settings.selectedLampID = selectedLampID }
     }
     @Published var colorSource: ColorSource {
         didSet {
-            UserDefaults.standard.set(colorSource.rawValue, forKey: colorSourceKey)
+            settings.colorSource = colorSource
             switchColorSource()
         }
     }
     @Published private(set) var siteSongId: String = ""
     @Published private(set) var siteSongTitle: String = ""
-    @Published private(set) var sitePlayingState: String = "等待網站…"
+    @Published private(set) var sitePlayingState: SitePlayingState = .waiting
     @Published private(set) var portInUse: Bool = false
     @Published var fadeTime: TimeInterval {
         didSet {
             engine.fadeTime = effectiveFadeTime
-            UserDefaults.standard.set(fadeTime, forKey: fadeTimeKey)
+            settings.fadeTime = fadeTime
         }
     }
     /// Caps the fade at `lowLatencyFade` so the lamp follows the screen as closely as possible.
     @Published var lowLatency: Bool {
         didSet {
             engine.fadeTime = effectiveFadeTime
-            UserDefaults.standard.set(lowLatency, forKey: lowLatencyKey)
+            settings.lowLatency = lowLatency
         }
     }
     @Published var breathing: Bool {
         didSet {
             engine.breathing = breathing
-            UserDefaults.standard.set(breathing, forKey: breathingKey)
+            settings.breathing = breathing
         }
     }
     @Published var vibrance: Double {
         didSet {
             engine.vibrance = vibrance
-            UserDefaults.standard.set(vibrance, forKey: vibranceKey)
+            settings.vibrance = vibrance
             regrade()
         }
     }
     @Published var minBrightness: Double {
         didSet {
             engine.minBrightness = minBrightness
-            UserDefaults.standard.set(minBrightness, forKey: minBrightnessKey)
+            settings.minBrightness = minBrightness
             regrade()
         }
     }
@@ -117,7 +91,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published var warmth: Double {
         didSet {
             engine.warmth = warmth
-            UserDefaults.standard.set(warmth, forKey: warmthKey)
+            settings.warmth = warmth
             regrade()
         }
     }
@@ -125,20 +99,20 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published var brightness: Double {
         didSet {
             engine.brightness = brightness
-            UserDefaults.standard.set(brightness, forKey: brightnessKey)
+            settings.brightness = brightness
             regrade()
         }
     }
     @Published var sceneCuts: Bool {
         didSet {
             engine.sceneCuts = sceneCuts
-            UserDefaults.standard.set(sceneCuts, forKey: sceneCutsKey)
+            settings.sceneCuts = sceneCuts
         }
     }
     @Published var beatSync: Bool {
         didSet {
             engine.beatSync = beatSync
-            UserDefaults.standard.set(beatSync, forKey: beatSyncKey)
+            settings.beatSync = beatSync
             guard phase == .syncing || phase == .reconnecting else { return }
             beatSync ? startAudio() : stopAudio()
         }
@@ -146,17 +120,16 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published var beatStyle: BeatStyle {
         didSet {
             engine.beatStyle = beatStyle
-            UserDefaults.standard.set(beatStyle.rawValue, forKey: beatStyleKey)
+            settings.beatStyle = beatStyle
         }
     }
     /// Area of the main display to sample (normalized 0–1, top-left origin); nil samples the whole display.
     /// Applies from the next sample, also while syncing.
     @Published var captureRegion: CGRect? {
         didSet {
-            let stored = captureRegion.map { [$0.minX, $0.minY, $0.width, $0.height].map(Double.init) }
-            UserDefaults.standard.set(stored, forKey: captureRegionKey)
+            settings.captureRegion = captureRegion
             screenStream?.update(region: captureRegion)
-            if phase == .syncing { status = syncingStatus }
+            if phase == .syncing { statusText = syncingStatusText }
         }
     }
     /// True while beat sync hears music and is shaping the light.
@@ -168,12 +141,12 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var screenColor: ScreenRGB?
     @Published private(set) var lampColor: ScreenRGB?
-    @Published private(set) var status = "正在啟動藍牙…若系統詢問藍牙權限，請按「允許」。"
-    @Published private(set) var errorMessage: String?
+    @Published private(set) var statusText = LText(id: "bt_starting") { L10n.statusBtStarting($0) }
+    @Published private(set) var errorText: LText?
     @Published private(set) var needsScreenPermission = false
     @Published private(set) var logLines: [String] = []
     /// Recent average capture and Bluetooth round-trip times while syncing.
-    @Published private(set) var latencySummary: String?
+    @Published private(set) var latencyText: LText?
 
     private var central: CBCentralManager!
     private var peripherals: [UUID: CBPeripheral] = [:]
@@ -193,39 +166,51 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private var lastLatencyReport: TimeInterval = 0
     private var latencyReports = 0
     private var pendingRGB: ScreenRGB?
-    private var stopReason: String?
+    private var stopReason: LText?
+    private var settings = SettingsStore()
     private var audioMonitor: SystemAudioMonitor?
     private var siteLink = SiteLink()
     private var siteEvaluator = SiteLightEvaluator()
-    private var siteBlinderUntil: Double = 0
-    private var siteColorJitter: (r: Int, g: Int, b: Int) = (0, 0, 0)
-    private var siteAccentUntil: Double = 0
-    private var siteAccentColor: ScreenRGB?
+    private var siteDirector = SiteStageDirector()
 
     override init() {
-        let defaults = UserDefaults.standard
-        let savedFade = defaults.object(forKey: fadeTimeKey) as? Double ?? 0.6
+        let savedFade = settings.fadeTime
+        let savedSource = settings.colorSource
+        let savedBreathing = settings.breathing
+        let savedVibrance = settings.vibrance
+        let savedMinBrightness = settings.minBrightness
+        let savedWarmth = settings.warmth
+        let savedBrightness = settings.brightness
+        let savedSceneCuts = settings.sceneCuts
+        let savedBeatSync = settings.beatSync
+        let savedBeatStyle = settings.beatStyle
+        let savedLowLatency = settings.lowLatency
+
         fadeTime = savedFade
-        let savedSource = defaults.string(forKey: colorSourceKey).flatMap(ColorSource.init(rawValue:)) ?? .screen
         colorSource = savedSource
-        breathing = defaults.bool(forKey: breathingKey)
-        vibrance = defaults.object(forKey: vibranceKey) as? Double ?? 0.4
-        minBrightness = defaults.object(forKey: minBrightnessKey) as? Double ?? 0
-        warmth = defaults.object(forKey: warmthKey) as? Double ?? 0
-        brightness = defaults.object(forKey: brightnessKey) as? Double ?? 1
-        sceneCuts = defaults.object(forKey: sceneCutsKey) as? Bool ?? true
-        beatSync = defaults.bool(forKey: beatSyncKey)
-        beatStyle = defaults.string(forKey: beatStyleKey).flatMap(BeatStyle.init(rawValue:)) ?? .flash
-        lowLatency = defaults.bool(forKey: lowLatencyKey)
-        if let stored = defaults.array(forKey: captureRegionKey) as? [Double], stored.count == 4 {
-            captureRegion = CGRect(x: stored[0], y: stored[1], width: stored[2], height: stored[3])
-        }
-        engine = LightEngine(fadeTime: savedFade, breathing: false)
+        breathing = savedBreathing
+        vibrance = savedVibrance
+        minBrightness = savedMinBrightness
+        warmth = savedWarmth
+        brightness = savedBrightness
+        sceneCuts = savedSceneCuts
+        beatSync = savedBeatSync
+        beatStyle = savedBeatStyle
+        lowLatency = savedLowLatency
+        captureRegion = settings.captureRegion
+        selectedLampID = settings.selectedLampID
+
+        let effectiveFade = savedLowLatency ? min(savedFade, Self.lowLatencyFade) : savedFade
+        var initialEngine = LightEngine(fadeTime: effectiveFade, breathing: savedBreathing)
+        initialEngine.vibrance = savedVibrance
+        initialEngine.minBrightness = savedMinBrightness
+        initialEngine.warmth = savedWarmth
+        initialEngine.brightness = savedBrightness
+        initialEngine.sceneCuts = savedSceneCuts
+        initialEngine.beatSync = savedBeatSync
+        initialEngine.beatStyle = savedBeatStyle
+        engine = initialEngine
         super.init()
-        engine = makeEngine()
-        if let saved = UserDefaults.standard.string(forKey: selectedLampKey) {
-            selectedLampID = UUID(uuidString: saved)
-        }
         needsScreenPermission = !CGPreflightScreenCaptureAccess()
         central = CBCentralManager(delegate: self, queue: .main)
         setupSiteLink()
@@ -238,7 +223,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
                 self.siteEvaluator.updateState(state, receivedAt: receivedAt)
                 self.siteSongId = state.song
                 self.siteSongTitle = state.title
-                self.sitePlayingState = state.playing ? "播放中" : "暫停"
+                self.sitePlayingState = state.playing ? .playing : .paused
                 if self.colorSource == .site, self.phase == .syncing {
                     self.render()
                 }
@@ -248,13 +233,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.siteEvaluator.reset()
+                self.siteDirector.reset()
                 self.siteSongId = ""
                 self.siteSongTitle = ""
-                self.siteBlinderUntil = 0
-                self.siteColorJitter = (0, 0, 0)
-                self.siteAccentUntil = 0
-                self.siteAccentColor = nil
-                self.sitePlayingState = "等待網站…"
+                self.sitePlayingState = .waiting
                 if self.colorSource == .site, self.phase == .syncing {
                     self.render()
                 }
@@ -278,8 +260,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         siteLink.start()
         portInUse = siteLink.portInUse
         if portInUse {
-            if phase == .syncing { status = syncingStatus }
-            log("錯誤：網站連動用的連接埠 51730 被別的程式佔用。")
+            if phase == .syncing { statusText = syncingStatusText }
+            log { L10n.logPortInUse($0) }
         }
     }
 
@@ -289,7 +271,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     }
 
     private func switchColorSource() {
-        log("取色來源切換為：\(colorSource.displayName)。")
+        let source = colorSource
+        log { L10n.logSourceSwitched(source, $0) }
         if colorSource == .site {
             startSiteLink()
             if phase == .syncing {
@@ -297,24 +280,25 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
                 screenStream = nil
                 stopAudio()
                 siteLink.setLampStatus(.linked)
-                status = syncingStatus
+                statusText = syncingStatusText
                 render()
             }
         } else {
             stopSiteLink()
             if phase == .syncing {
                 siteEvaluator.reset()
+                siteDirector.reset()
                 siteSongTitle = ""
-                sitePlayingState = "等待網站…"
+                sitePlayingState = .waiting
                 if !ScreenColorSampler.requestPermissionIfNeeded() {
                     needsScreenPermission = true
-                    fail("需要螢幕錄製權限。請在「系統設定 › 隱私權與安全性 › 螢幕與系統錄音」允許本 App，然後結束並重新開啟本 App。")
+                    fail(LText(id: "screen_perm") { L10n.errScreenPermission($0) })
                     return
                 }
                 needsScreenPermission = false
                 startScreenStream()
                 if beatSync { startAudio() }
-                status = syncingStatus
+                statusText = syncingStatusText
                 render()
             }
         }
@@ -354,12 +338,12 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
 
     func startScan() {
         guard bluetoothReady, phase == .idle else { return }
-        errorMessage = nil
+        errorText = nil
         lamps.removeAll { !$0.remembered && $0.id != selectedLampID }
         for index in lamps.indices { lamps[index].rssi = nil }
         isScanning = true
-        status = "掃描中：請讓手燈進入配對模式（長按背面按鈕至藍燈閃爍）。"
-        log("開始掃描 \(targetName)。")
+        statusText = LText(id: "scanning") { L10n.statusScanning($0) }
+        log { L10n.logScanStart(targetName, $0) }
         central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
         scanStopWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.stopScan(finished: true) }
@@ -375,18 +359,20 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         isScanning = false
         if finished, phase == .idle {
             let found = lamps.filter { $0.rssi != nil }.count
-            status = found == 0 ? "沒有找到手燈。確認手燈在配對模式，且手機 App 已關閉。" : "找到 \(found) 支手燈，選擇後按「開始連動」。"
+            statusText = found == 0
+                ? LText(id: "scan_none") { L10n.statusScanNone($0) }
+                : LText(id: "scan_found_\(found)") { L10n.statusScanFound(found, $0) }
         }
     }
 
     func start() {
         guard canStart, let id = selectedLampID else { return }
-        errorMessage = nil
+        errorText = nil
         stopScan()
         if colorSource == .screen {
             if !ScreenColorSampler.requestPermissionIfNeeded() {
                 needsScreenPermission = true
-                fail("需要螢幕錄製權限。請在「系統設定 › 隱私權與安全性 › 螢幕與系統錄音」允許本 App，然後結束並重新開啟本 App。")
+                fail(LText(id: "screen_perm") { L10n.errScreenPermission($0) })
                 return
             }
             needsScreenPermission = false
@@ -395,11 +381,11 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             startSiteLink()
         }
         guard let target = peripherals[id] ?? central.retrievePeripherals(withIdentifiers: [id]).first else {
-            fail("找不到選擇的手燈。請先按「掃描」。")
+            fail(LText(id: "lamp_not_found") { L10n.errSelectedLampNotFound($0) })
             return
         }
         guard target.name == targetName else {
-            fail("選擇的裝置名稱不是 \(targetName)，已拒絕連線。請重新掃描。")
+            fail(LText(id: "wrong_name") { L10n.errWrongDeviceName(targetName, $0) })
             return
         }
         peripherals[id] = target
@@ -411,14 +397,14 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         lastRenderAt = nil
         phase = .connecting
         siteLink.setLampStatus(.connecting)
-        status = "連線中…"
-        log("連線 \(targetName)（\(id.uuidString)）。")
+        statusText = LText(id: "connecting") { L10n.statusConnecting($0) }
+        log { L10n.logConnecting(targetName, id.uuidString, $0) }
         target.delegate = self
         central.connect(target, options: nil)
         connectTimeoutWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.phase == .connecting else { return }
-            self.fail("連線逾時。請讓手燈重新進入配對模式後再試。")
+            self.fail(LText(id: "connect_timeout") { L10n.errConnectTimeout($0) })
         }
         connectTimeoutWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.connectTimeout, execute: work)
@@ -435,20 +421,20 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         bluetoothReady = central.state == .poweredOn
         switch central.state {
         case .poweredOn:
-            status = "藍牙就緒。按「掃描」尋找手燈。"
+            statusText = LText(id: "bt_ready") { L10n.statusBtReady($0) }
             restoreRememberedLamp()
         case .unauthorized:
-            status = "未允許藍牙權限。請在「系統設定 › 隱私權與安全性 › 藍牙」允許本 App。"
+            statusText = LText(id: "bt_unauth") { L10n.statusBtUnauthorized($0) }
         case .poweredOff:
-            status = "藍牙已關閉，請開啟藍牙。"
+            statusText = LText(id: "bt_off") { L10n.statusBtOff($0) }
         case .unsupported:
-            status = "這台電腦不支援低功耗藍牙。"
+            statusText = LText(id: "bt_unsupported") { L10n.statusBtUnsupported($0) }
         default:
-            status = "正在啟動藍牙…若系統詢問藍牙權限，請按「允許」。"
+            statusText = LText(id: "bt_starting") { L10n.statusBtStarting($0) }
         }
         if !bluetoothReady {
             isScanning = false
-            if phase != .idle { shutDown(reason: "藍牙已無法使用，連動已停止。") }
+            if phase != .idle { shutDown(reason: LText(id: "bt_unavailable") { L10n.errBtUnavailable($0) }) }
         }
     }
 
@@ -467,7 +453,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             lamps[index].rssi = rssi ?? lamps[index].rssi
         } else {
             lamps.append(DiscoveredLamp(id: peripheral.identifier, rssi: rssi, remembered: false))
-            log("找到手燈 \(peripheral.identifier.uuidString)。")
+            let uuid = peripheral.identifier.uuidString
+            log { L10n.logLampFound(uuid, $0) }
         }
         if selectedLampID == nil || !lamps.contains(where: { $0.id == selectedLampID }) {
             selectedLampID = peripheral.identifier
@@ -480,11 +467,11 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             return
         }
         guard peripheral.identifier == selectedLampID, peripheral.name == targetName else {
-            fail("連上的裝置與選擇的手燈不符，已中斷。")
+            fail(LText(id: "connected_wrong") { L10n.errConnectedWrongLamp($0) })
             return
         }
-        status = "已連線，尋找控制服務…"
-        log("已連線，探索服務 0000。")
+        statusText = LText(id: "discovering") { L10n.statusDiscoveringServices($0) }
+        log { L10n.logConnectedDiscovering($0) }
         peripheral.discoverServices([controlUUID])
     }
 
@@ -494,7 +481,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             retryConnect()
             return
         }
-        fail("無法連線：\(error?.localizedDescription ?? "未知錯誤")。")
+        let detail = error?.localizedDescription
+        fail(LText(id: "connect_fail_\(detail ?? "")") { L10n.errFailedToConnect(detail, $0) })
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -503,12 +491,12 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         case .stopping:
             finishStop()
         case .syncing:
-            let detail = error.map { "（\($0.localizedDescription)）" } ?? ""
-            reconnect(because: "手燈連線中斷\(detail)")
+            let detail = error?.localizedDescription
+            reconnect(because: LText(id: "disconnect_\(detail ?? "")") { L10n.reasonDisconnected(detail, $0) })
         case .reconnecting:
             retryConnect()
         case .connecting:
-            shutDown(reason: "手燈連線中斷。請讓手燈重新進入配對模式後再按「開始連動」。")
+            shutDown(reason: LText(id: "disconnected") { L10n.errDisconnected($0) })
         case .idle:
             break
         }
@@ -518,9 +506,13 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard phase == .connecting || phase == .reconnecting else { return }
-        if let error { fail("服務探索失敗：\(error.localizedDescription)"); return }
+        if let error {
+            let detail = error.localizedDescription
+            fail(LText(id: "svc_fail_\(detail)") { L10n.errServiceDiscovery(detail, $0) })
+            return
+        }
         guard let service = peripheral.services?.first(where: { $0.uuid == controlUUID }) else {
-            fail("手燈沒有控制服務 0000。")
+            fail(LText(id: "no_svc") { L10n.errNoControlService($0) })
             return
         }
         peripheral.discoverCharacteristics([controlUUID], for: service)
@@ -528,10 +520,14 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard phase == .connecting || phase == .reconnecting else { return }
-        if let error { fail("特徵探索失敗：\(error.localizedDescription)"); return }
+        if let error {
+            let detail = error.localizedDescription
+            fail(LText(id: "char_fail_\(detail)") { L10n.errCharDiscovery(detail, $0) })
+            return
+        }
         guard let found = service.characteristics?.first(where: { $0.uuid == controlUUID }),
               found.properties.contains(.write) else {
-            fail("手燈的控制特徵 0000 不支援有回應寫入。")
+            fail(LText(id: "char_no_write") { L10n.errCharNoWrite($0) })
             return
         }
         connectTimeoutWork?.cancel()
@@ -541,12 +537,12 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         reconnectDeadlineWork = nil
         phase = .syncing
         siteLink.setLampStatus(.linked)
-        status = syncingStatus
+        statusText = syncingStatusText
         if reconnected {
-            log("已自動重新連線，繼續連動。")
+            log { L10n.logReconnected($0) }
             return // Timers and audio kept running while the link was down.
         }
-        log("連動開始。")
+        log { L10n.logSyncStarted($0) }
         captureLatency = LatencyMeter()
         bluetoothLatency = LatencyMeter()
         lastLatencyReport = ProcessInfo.processInfo.systemUptime
@@ -571,7 +567,10 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         let color = pendingRGB
         pendingRGB = nil
         if let error {
-            if phase == .syncing { reconnect(because: "藍牙寫入失敗（\(error.localizedDescription)）") }
+            if phase == .syncing {
+                let detail = error.localizedDescription
+                reconnect(because: LText(id: "write_fail_\(detail)") { L10n.reasonWriteFailed(detail, $0) })
+            }
             return
         }
         bluetoothLatency.add((ProcessInfo.processInfo.systemUptime - started) * 1000)
@@ -589,7 +588,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         guard phase == .syncing else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if let started = writeStartedAt, now - started >= Self.operationTimeout {
-            reconnect(because: "藍牙寫入超過 8 秒沒有回應")
+            reconnect(because: LText(id: "write_timeout") { L10n.reasonWriteTimeout($0) })
             return
         }
         if now - lastLatencyReport >= Self.latencyReportInterval {
@@ -631,8 +630,20 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
     private func screenStreamFailed(_ error: Error) {
         screenStream = nil
         guard phase == .syncing || phase == .reconnecting else { return }
-        if case ScreenColorError.screenCapturePermissionDenied = error { needsScreenPermission = true }
-        shutDown(reason: "螢幕擷取失敗：\(error.localizedDescription)")
+        if let screenError = error as? ScreenColorError {
+            switch screenError {
+            case .screenCapturePermissionDenied:
+                needsScreenPermission = true
+                shutDown(reason: LText(id: "screen_perm") { L10n.errScreenPermission($0) })
+            case .noDisplaysAvailable:
+                shutDown(reason: LText(id: "no_displays") { L10n.errNoDisplays($0) })
+            case .couldNotReadScreenshot:
+                shutDown(reason: LText(id: "read_screenshot") { L10n.errCouldNotReadScreenshot($0) })
+            }
+            return
+        }
+        let detail = error.localizedDescription
+        shutDown(reason: LText(id: "screen_fail_\(detail)") { L10n.errScreenCaptureFailed(detail, $0) })
     }
 
     /// Advances the effects and writes the frame when it differs from the lamp's acknowledged color.
@@ -643,124 +654,28 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         lastRenderAt = now
 
         if colorSource == .site {
-            let frame = siteEvaluator.evaluate(now: Date(), userBeatStyle: beatStyle)
-            siteSongTitle = siteEvaluator.latestState?.title ?? ""
-            if frame.isWaiting {
-                sitePlayingState = "等待網站…"
-            } else if siteEvaluator.latestState?.playing == true {
-                sitePlayingState = "播放中"
-            } else {
-                sitePlayingState = "暫停"
+            let stage = siteDirector.step(
+                uptime: now,
+                now: Date(),
+                baseBrightness: brightness,
+                effectiveFadeTime: effectiveFadeTime,
+                lowLatency: lowLatency,
+                userBeatStyle: beatStyle,
+                evaluator: siteEvaluator
+            )
+            siteSongTitle = stage.songTitle
+            sitePlayingState = stage.playingState
+            engine.brightness = stage.effectiveBrightness
+            engine.fadeTime = stage.effectiveFadeTime
+            engine.beatDepth = stage.beatDepth
+            engine.beatStyle = stage.beatStyle
+            engine.beatSync = stage.beatSync
+            engine.breathing = stage.breathing
+            if let strength = stage.beatStrength {
+                engine.beat(strength: strength, bpm: stage.beatBpm)
             }
-            screenColor = frame.targetColor
-
-            // 下潛蓄力：大鼓第 1 拍前約 80ms 壓暗至 28%，大鼓落地時瞬間暴衝至滿亮，對比度躍升 4～5 倍！
-            let effectiveBrightness = brightness * (frame.isPreDownbeat ? 0.28 : frame.brightnessMultiplier)
-            engine.brightness = effectiveBrightness
-            // 網站模式專屬優化：讓 1～2 拍快速換色與連續鼓聲切換乾脆俐落
-            engine.fadeTime = lowLatency ? 0.10 : min(effectiveFadeTime, 0.20)
-            engine.beatDepth = 0.65 // 拉大拍間動態深度，大幅增強明暗對比（拍間底暗降至 35%）
-
-            let isPlaying = siteEvaluator.latestState?.playing == true && !frame.isWaiting
-            let isListen = siteEvaluator.latestState?.cue == "listen"
-            let hasBeat = isPlaying && !isListen && frame.beatBpm > 0
-
-            if frame.isClimax {
-                engine.beatStyle = .blink
-                engine.beatSync = true
-                engine.breathing = false
-            } else if hasBeat {
-                // 網站模式下：自動與換色風格改用律動加亮，避免 autoStyle 誤判為無亮度的 .colors
-                if beatStyle == .auto || beatStyle == .colors {
-                    engine.beatStyle = .flash
-                } else {
-                    engine.beatStyle = beatStyle
-                }
-                engine.beatSync = true
-                engine.breathing = false
-            } else if isPlaying {
-                // 沒有拍點的歌曲（如 Value）或抒情安靜聽（listen）：自動開啟自然呼吸律動，如螢幕模式般自然！
-                engine.beatSync = false
-                engine.breathing = true
-                engine.beatStyle = .flash
-            } else {
-                // 暫停或等待中
-                engine.beatSync = false
-                engine.breathing = false
-            }
-
-            if frame.shouldBeat {
-                // 節奏強弱層次與有機動態：
-                // 1. 第 1 拍大鼓重拍：滿力衝擊（1.00），固定觸發「舞台盲閃白光爆破」
-                // 2. 第 3 拍次重音：0.70~0.80
-                // 3. 第 2、4 拍弱音律動：0.45~0.55，第 4 拍過門加入鼓點切分音（0.65~0.78）
-                let strength: Double
-                if frame.isBarStart {
-                    strength = 1.00
-                    // 必出舞台盲閃白光爆破：大鼓重拍 100% 觸發高亮白光
-                    if frame.beatBpm >= 100 {
-                        siteBlinderUntil = now + 0.08 // 80ms 盲閃
-                    }
-                } else if frame.beatInBar == 2 {
-                    strength = Double.random(in: 0.70...0.80)
-                } else if frame.beatInBar == 3 && frame.beatBpm >= 115 {
-                    // 第 4 拍鼓點切分音／過門加重（drum fill pickup）
-                    strength = Double.random(in: 0.65...0.78)
-                } else {
-                    strength = Double.random(in: 0.45...0.55)
-                }
-                engine.beat(strength: strength, bpm: frame.beatBpm)
-
-                // 螢幕取色般的色彩有機微擾動（每拍微幅晃動，擺脫固定單一色澤）
-                siteColorJitter = (
-                    Int.random(in: -8...8),
-                    Int.random(in: -8...8),
-                    Int.random(in: -8...8)
-                )
-
-                // 單色歌曲的舞台跳色點綴（例如逆光全紅時，偶爾在次重音閃耀金黃琥珀色）
-                let colorsCount = siteEvaluator.latestState?.colors.count ?? 0
-                if colorsCount <= 1 && frame.beatBpm >= 115 {
-                    if (frame.beatInBar == 2 || frame.isBarStart) && Double.random(in: 0...1) < 0.22 {
-                        let base = frame.targetColor
-                        if base.red > 180 && base.blue < 120 {
-                            // 紅色系 -> 點綴琥珀金黃色
-                            siteAccentColor = ScreenRGB(red: 255, green: 175, blue: 60)
-                            siteAccentUntil = now + 0.12
-                        } else if base.blue > 180 && base.red < 120 {
-                            // 藍色系 -> 點綴青綠／青空色
-                            siteAccentColor = ScreenRGB(red: 60, green: 220, blue: 210)
-                            siteAccentUntil = now + 0.12
-                        } else if base.red > 140 && base.blue > 140 {
-                            // 紫色系 -> 點綴亮洋紅
-                            siteAccentColor = ScreenRGB(red: 255, green: 90, blue: 180)
-                            siteAccentUntil = now + 0.12
-                        }
-                    }
-                }
-            }
-
-            // 計算最終送給 LightEngine 的目標色
-            var effectiveColor = frame.targetColor
-            if now < siteBlinderUntil {
-                // 舞台大盲閃白光爆破：高達 86% 高亮白色核心，隨後迅速綻放回歌曲原色
-                let whiteFactor = 0.86
-                let r = UInt8(min(255.0, Double(effectiveColor.red) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
-                let g = UInt8(min(255.0, Double(effectiveColor.green) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
-                let b = UInt8(min(255.0, Double(effectiveColor.blue) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
-                effectiveColor = ScreenRGB(red: r, green: g, blue: b)
-            } else if now < siteAccentUntil, let accent = siteAccentColor {
-                effectiveColor = accent
-            } else if hasBeat {
-                // 螢幕取色般的色彩有機微擾動
-                let r = UInt8(clamping: Int(effectiveColor.red) + siteColorJitter.r)
-                let g = UInt8(clamping: Int(effectiveColor.green) + siteColorJitter.g)
-                let b = UInt8(clamping: Int(effectiveColor.blue) + siteColorJitter.b)
-                effectiveColor = ScreenRGB(red: r, green: g, blue: b)
-            }
-
-            screenColor = effectiveColor
-            engine.setTarget(effectiveColor)
+            screenColor = stage.effectiveColor
+            engine.setTarget(stage.effectiveColor)
         } else {
             engine.brightness = brightness
             engine.fadeTime = effectiveFadeTime
@@ -786,7 +701,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
             pendingRGB = frame
             peripheral.writeValue(payload, for: characteristic, type: .withResponse)
         } catch {
-            shutDown(reason: "無法編碼顏色指令：\(error.localizedDescription)")
+            let detail = error.localizedDescription
+            shutDown(reason: LText(id: "encode_fail_\(detail)") { L10n.errEncodeFailed(detail, $0) })
         }
     }
 
@@ -795,33 +711,40 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         let capture = captureLatency.drain()
         let bluetooth = bluetoothLatency.drain()
         guard capture != nil || bluetooth != nil else { return }
-        func describe(_ stats: LatencyMeter.Summary?) -> String {
-            stats.map { String(format: "%.0f ms（最高 %.0f）", $0.average, $0.maximum) } ?? "—"
+        let interval = Int(Self.latencyReportInterval)
+        let summary = LText(id: "latency_\(latencyReports)") { lang in
+            L10n.latencySummary(
+                intervalSeconds: interval,
+                captureAvg: capture?.average,
+                captureMax: capture?.maximum,
+                btAvg: bluetooth?.average,
+                btMax: bluetooth?.maximum,
+                lang
+            )
         }
-        let summary = "延遲（近 \(Int(Self.latencyReportInterval)) 秒平均）：畫面擷取 \(describe(capture))・藍牙來回 \(describe(bluetooth))"
-        latencySummary = summary
+        latencyText = summary
         latencyReports += 1
-        if latencyReports % 6 == 1 { log(summary) }
+        if latencyReports % 6 == 1 { log { summary.resolve($0) } }
     }
 
     // MARK: - Shutdown
 
-    private func fail(_ message: String) {
+    private func fail(_ message: LText) {
         if phase == .idle {
-            errorMessage = message
-            status = "未連動。"
-            log("錯誤：\(message)")
+            errorText = message
+            statusText = LText(id: "not_syncing") { L10n.statusNotSyncing($0) }
+            log { L10n.logErrorPrefix(message.resolve($0), $0) }
         } else {
             shutDown(reason: message)
         }
     }
 
     /// `reason == nil` means the user pressed Stop.
-    private func shutDown(reason: String?) {
+    private func shutDown(reason: LText?) {
         guard phase != .idle, phase != .stopping else { return }
         stopReason = reason
         phase = .stopping
-        status = "停止中…"
+        statusText = LText(id: "stopping") { L10n.statusStopping($0) }
         watchdogTimer?.invalidate()
         watchdogTimer = nil
         renderTimer?.invalidate()
@@ -859,18 +782,18 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         writeStartedAt = nil
         pendingRGB = nil
         lastRenderAt = nil
-        latencySummary = nil
+        latencyText = nil
         siteLink.setLampStatus(.idle)
         if colorSource != .site {
             stopSiteLink()
         }
         if let reason = stopReason {
-            errorMessage = reason
-            status = "連動已因錯誤停止。"
-            log("錯誤：\(reason)")
+            errorText = reason
+            statusText = LText(id: "stopped_err") { L10n.statusStoppedError($0) }
+            log { L10n.logErrorPrefix(reason.resolve($0), $0) }
         } else {
-            status = "已停止連動。"
-            log("使用者停止連動。")
+            statusText = LText(id: "stopped_user") { L10n.statusStoppedUser($0) }
+            log { L10n.logStoppedByUser($0) }
         }
     }
 
@@ -879,21 +802,21 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         RegionSelector.select { [weak self] region in
             guard let self, let region else { return }
             self.captureRegion = region
-            self.log(String(format: "取色範圍改為框選區域（寬 %.0f%%、高 %.0f%%）。", region.width * 100, region.height * 100))
+            self.log { L10n.logRegionCustom(widthPct: region.width * 100, heightPct: region.height * 100, $0) }
         }
     }
 
     func useWholeScreen() {
         guard captureRegion != nil else { return }
         captureRegion = nil
-        log("取色範圍改回整個主螢幕。")
+        log { L10n.logRegionWholeScreen($0) }
     }
 
     // MARK: - Reconnect
 
     /// Keeps sampling and effect state, drops the link and waits (up to `reconnectWindow`) for the lamp
     /// to accept a new connection. CoreBluetooth's connect request stays pending until the lamp is reachable.
-    private func reconnect(because reason: String) {
+    private func reconnect(because reason: LText) {
         guard phase == .syncing, let peripheral else { return }
         phase = .reconnecting
         siteLink.setLampStatus(.connecting)
@@ -901,11 +824,16 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         writeStartedAt = nil
         pendingRGB = nil
         lampColor = nil // Rewrite the current color as soon as the link is back.
-        status = "\(reason)，正在自動重新連線（最多 \(Int(Self.reconnectWindow)) 秒）…若一直連不上，請長按手燈背面按鈕進入配對模式。"
-        log("\(reason)，自動重新連線中。")
+        let windowSeconds = Int(Self.reconnectWindow)
+        statusText = LText(id: "reconnecting_\(windowSeconds)") {
+            L10n.statusReconnecting(reason.resolve($0), windowSeconds: windowSeconds, $0)
+        }
+        log { L10n.logReconnecting(reason.resolve($0), $0) }
         let deadline = DispatchWorkItem { [weak self] in
             guard let self, self.phase == .reconnecting else { return }
-            self.shutDown(reason: "\(reason)，\(Int(Self.reconnectWindow)) 秒內無法重新連上手燈。請讓手燈重新進入配對模式後再按「開始連動」。")
+            self.shutDown(reason: LText(id: "reconnect_timeout") {
+                L10n.errReconnectTimedOut(reason.resolve($0), windowSeconds: windowSeconds, $0)
+            })
         }
         reconnectDeadlineWork = deadline
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.reconnectWindow, execute: deadline)
@@ -940,7 +868,7 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
                     monitor.stop() // Stopped or replaced while starting.
                     return
                 }
-                self.log("節拍偵測：開始聆聽系統音訊。")
+                self.log { L10n.logAudioStarted($0) }
             } catch {
                 guard let self, self.audioMonitor === monitor else { return }
                 self.audioFailed(error)
@@ -963,20 +891,22 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         musicDetected = false
         bpm = nil
         activeBeatStyle = nil
-        errorMessage = "無法擷取系統音訊，節拍同步暫停（顏色連動照常）：\(error.localizedDescription)"
-        log("節拍偵測失敗：\(error.localizedDescription)")
+        let detail = error.localizedDescription
+        errorText = LText(id: "audio_fail_\(detail)") { L10n.errAudioFailed(detail, $0) }
+        log { L10n.logAudioFailed(detail, $0) }
     }
 
     // MARK: - Helpers
 
-    private var syncingStatus: String {
+    private var syncingStatusText: LText {
         if colorSource == .site {
             if portInUse {
-                return "網站連動用的連接埠 51730 被別的程式佔用。"
+                return LText(id: "sync_site_port") { L10n.statusSyncingSitePortInUse($0) }
             }
-            return "連動中：跟隨網站（Ado 應援預習）。"
+            return LText(id: "sync_site") { L10n.statusSyncingSite($0) }
         }
-        return captureRegion == nil ? "連動中：跟隨主螢幕平均色。" : "連動中：跟隨框選範圍的平均色。"
+        let hasRegion = captureRegion != nil
+        return LText(id: "sync_screen_\(hasRegion)") { L10n.statusSyncingScreen(hasRegion: hasRegion, $0) }
     }
 
     /// Re-grades the last screen color so color changes show right away, even on a still screen.
@@ -1011,7 +941,8 @@ final class PenlightController: NSObject, ObservableObject, CBCentralManagerDele
         lamps.append(DiscoveredLamp(id: id, rssi: nil, remembered: true))
     }
 
-    private func log(_ line: String) {
+    private func log(_ make: (AppLanguage) -> String) {
+        let line = make(MainActor.assumeIsolated { L10n.currentLanguage })
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
         logLines.append("\(formatter.string(from: Date())) \(line)")

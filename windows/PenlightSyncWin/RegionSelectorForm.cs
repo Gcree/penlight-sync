@@ -69,7 +69,7 @@ internal sealed class RegionSelectorForm : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        const string hint = "拖曳框選影片所在的範圍，手燈只跟這塊畫面變色。按 Esc 取消。";
+        var hint = L10n.RegionOverlayHint();
         using var font = new Font("Microsoft JhengHei UI", 18f, FontStyle.Bold);
         var size = TextRenderer.MeasureText(hint, font);
         TextRenderer.DrawText(e.Graphics, hint, font, new Point((ClientSize.Width - size.Width) / 2, 80), Color.White);

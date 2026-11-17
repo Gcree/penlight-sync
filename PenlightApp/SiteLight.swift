@@ -1,5 +1,11 @@
 import Foundation
 
+enum SitePlayingState: Equatable {
+    case waiting
+    case playing
+    case paused
+}
+
 /// Beat configuration received from the website.
 struct SiteBeat: Equatable, Sendable, Codable {
     let bpm: Double
@@ -330,5 +336,177 @@ final class SiteLightEvaluator {
             beatInBar: beatInBar,
             isPreDownbeat: isPreDownbeat
         )
+    }
+}
+
+/// Pure output of `SiteStageDirector` applied to `LightEngine` and UI state on each frame.
+struct SiteStageOutput: Equatable {
+    let effectiveColor: ScreenRGB
+    let effectiveBrightness: Double
+    let effectiveFadeTime: TimeInterval
+    let beatDepth: Double
+    let beatSync: Bool
+    let beatStyle: BeatStyle
+    let breathing: Bool
+    let beatStrength: Double?
+    let beatBpm: Double
+    let playingState: SitePlayingState
+    let songTitle: String
+}
+
+/// Owns the live concert stage effects for Website Mode (pre-downbeat dip, blinder flash, organic color jitter,
+/// and single-color song accent pops) outside the controller so both Mac and Windows share tested behavior.
+final class SiteStageDirector {
+    private let nextRandom: () -> Double
+    private var blinderUntil: TimeInterval = 0
+    private var colorJitter: (r: Int, g: Int, b: Int) = (0, 0, 0)
+    private var accentUntil: TimeInterval = 0
+    private var accentColor: ScreenRGB?
+
+    init(nextRandom: @escaping () -> Double = { Double.random(in: 0..<1) }) {
+        self.nextRandom = nextRandom
+    }
+
+    func reset() {
+        blinderUntil = 0
+        colorJitter = (0, 0, 0)
+        accentUntil = 0
+        accentColor = nil
+    }
+
+    func step(
+        uptime: TimeInterval,
+        now: Date = Date(),
+        baseBrightness: Double,
+        effectiveFadeTime: Double,
+        lowLatency: Bool,
+        userBeatStyle: BeatStyle,
+        evaluator: SiteLightEvaluator
+    ) -> SiteStageOutput {
+        let frame = evaluator.evaluate(now: now, userBeatStyle: userBeatStyle)
+        let songTitle = evaluator.latestState?.title ?? ""
+        let playingState: SitePlayingState
+        if frame.isWaiting {
+            playingState = .waiting
+        } else if evaluator.latestState?.playing == true {
+            playingState = .playing
+        } else {
+            playingState = .paused
+        }
+
+        // Pre-downbeat dip: compress brightness to 28% ~80ms before beat 1, then surge back to full.
+        let stageBrightness = baseBrightness * (frame.isPreDownbeat ? 0.28 : frame.brightnessMultiplier)
+        let stageFadeTime = lowLatency ? 0.10 : min(effectiveFadeTime, 0.20)
+        let stageBeatDepth = 0.65
+
+        let isPlaying = evaluator.latestState?.playing == true && !frame.isWaiting
+        let isListen = evaluator.latestState?.cue == "listen"
+        let hasBeat = isPlaying && !isListen && frame.beatBpm > 0
+
+        let stageBeatStyle: BeatStyle
+        let stageBeatSync: Bool
+        let stageBreathing: Bool
+        if frame.isClimax {
+            stageBeatStyle = .blink
+            stageBeatSync = true
+            stageBreathing = false
+        } else if hasBeat {
+            stageBeatStyle = (userBeatStyle == .auto || userBeatStyle == .colors) ? .flash : userBeatStyle
+            stageBeatSync = true
+            stageBreathing = false
+        } else if isPlaying {
+            stageBeatStyle = .flash
+            stageBeatSync = false
+            stageBreathing = true
+        } else {
+            stageBeatStyle = .flash
+            stageBeatSync = false
+            stageBreathing = false
+        }
+
+        var triggerStrength: Double?
+        if frame.shouldBeat {
+            let strength: Double
+            if frame.isBarStart {
+                strength = 1.00
+                if frame.beatBpm >= 100 {
+                    blinderUntil = uptime + 0.08
+                }
+            } else if frame.beatInBar == 2 {
+                strength = 0.70 + clampedUnit() * 0.10
+            } else if frame.beatInBar == 3 && frame.beatBpm >= 115 {
+                strength = 0.65 + clampedUnit() * 0.13
+            } else {
+                strength = 0.45 + clampedUnit() * 0.10
+            }
+            triggerStrength = strength
+
+            colorJitter = (
+                randomChannelOffset(),
+                randomChannelOffset(),
+                randomChannelOffset()
+            )
+
+            let colorsCount = evaluator.latestState?.colors.count ?? 0
+            if colorsCount <= 1 && frame.beatBpm >= 115 {
+                if (frame.beatInBar == 2 || frame.isBarStart) && clampedUnit() < 0.22 {
+                    let base = frame.targetColor
+                    if base.red > 180 && base.blue < 120 {
+                        accentColor = ScreenRGB(red: 255, green: 175, blue: 60)
+                        accentUntil = uptime + 0.12
+                    } else if base.blue > 180 && base.red < 120 {
+                        accentColor = ScreenRGB(red: 60, green: 220, blue: 210)
+                        accentUntil = uptime + 0.12
+                    } else if base.red > 140 && base.blue > 140 {
+                        accentColor = ScreenRGB(red: 255, green: 90, blue: 180)
+                        accentUntil = uptime + 0.12
+                    }
+                }
+            }
+        }
+
+        var effectiveColor = frame.targetColor
+        if uptime < blinderUntil {
+            let whiteFactor = 0.86
+            let r = UInt8(min(255.0, Double(effectiveColor.red) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
+            let g = UInt8(min(255.0, Double(effectiveColor.green) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
+            let b = UInt8(min(255.0, Double(effectiveColor.blue) * (1.0 - whiteFactor) + 255.0 * whiteFactor))
+            effectiveColor = ScreenRGB(red: r, green: g, blue: b)
+        } else if uptime < accentUntil, let accent = accentColor {
+            effectiveColor = accent
+        } else if hasBeat {
+            let r = UInt8(clamping: Int(effectiveColor.red) + colorJitter.r)
+            let g = UInt8(clamping: Int(effectiveColor.green) + colorJitter.g)
+            let b = UInt8(clamping: Int(effectiveColor.blue) + colorJitter.b)
+            effectiveColor = ScreenRGB(red: r, green: g, blue: b)
+        }
+
+        return SiteStageOutput(
+            effectiveColor: effectiveColor,
+            effectiveBrightness: stageBrightness,
+            effectiveFadeTime: stageFadeTime,
+            beatDepth: stageBeatDepth,
+            beatSync: stageBeatSync,
+            beatStyle: stageBeatStyle,
+            breathing: stageBreathing,
+            beatStrength: triggerStrength,
+            beatBpm: frame.beatBpm,
+            playingState: playingState,
+            songTitle: songTitle
+        )
+    }
+
+    private func clampedUnit() -> Double {
+        min(1.0, max(0.0, nextRandom()))
+    }
+
+    private func randomChannelOffset() -> Int {
+        Int((clampedUnit() * 17.0).rounded(.down).clamped(to: 0...16)) - 8
+    }
+}
+
+private extension Double {
+    func clamped(to range: ClosedRange<Double>) -> Double {
+        min(range.upperBound, max(range.lowerBound, self))
     }
 }
