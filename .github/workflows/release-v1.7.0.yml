@@ -34,7 +34,7 @@ jobs:
           mkdir -p dist/package
           cp -R dist/PenlightSync.app dist/package/
           swiftc -parse-as-library ScreenColor.swift PenlightProtocol.swift PenlightSync.swift -o dist/package/PenlightSync
-          cp "開始連動.command" README.md README.en.md LICENSE NOTICE.md dist/package/
+          cp "開始連動.command" "開啟手燈連動.command" README.md README.en.md LICENSE NOTICE.md dist/package/
           (cd dist/package && zip -r ../PenlightSync-macOS.zip .)
       - name: Upload macOS release asset
         uses: actions/upload-artifact@v4

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 SOURCE = pathlib.Path(__file__).resolve().parents[1] / '開始連動.command'
+OPEN_APP_SOURCE = pathlib.Path(__file__).resolve().parents[1] / '開啟手燈連動.command'
 
 
 class LauncherTests(unittest.TestCase):
@@ -43,6 +44,23 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('device-id.txt', result.stdout)
         self.assertNotIn('sample permission error', log)
+
+    def test_open_app_helper_unquarantines_and_opens_local_bundle(self):
+        with tempfile.TemporaryDirectory(prefix='penlight-open-helper-') as tmp:
+            root = pathlib.Path(tmp)
+            helper = root / OPEN_APP_SOURCE.name
+            helper.write_bytes(OPEN_APP_SOURCE.read_bytes())
+            app_dir = root / 'PenlightSync.app'
+            app_dir.mkdir()
+            open_stub = root / 'open-stub'
+            opened_log = root / 'opened.txt'
+            open_stub.write_text('#!/bin/zsh\nprint -r -- "$1" > "$OPENED_LOG"\n')
+            open_stub.chmod(0o700)
+            env = dict(os.environ, PENLIGHT_OPEN_BIN=str(open_stub), OPENED_LOG=str(opened_log))
+            result = subprocess.run(['/bin/zsh', str(helper)], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, env=env, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(opened_log.read_text().strip(), str(app_dir.resolve()))
 
 
 if __name__ == '__main__':

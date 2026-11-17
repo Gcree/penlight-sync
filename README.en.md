@@ -48,7 +48,10 @@ Both apps share the same layout, and the colors follow the system light/dark set
 4. The first sync needs Screen Recording permission: allow the app in System Settings › Privacy & Security › Screen & System Audio Recording. If it is not listed, click "+" and add the app. Then **quit and reopen the app**.
 5. Click 停止連動 (Stop) to disconnect so the phone app can use the lamp again.
 
-The app is ad-hoc signed (not notarized). If macOS blocks it, right-click the app in Finder and choose Open. Every rebuild counts as a new app to macOS, so Bluetooth and Screen Recording must be allowed again.
+The app is ad-hoc signed (not notarized). If macOS blocks it on first launch or prompts to move it to Trash:
+- Click "Done", then open **System Settings › Privacy & Security** and click **Open Anyway**;
+- Or run `開啟手燈連動.command` in the extracted folder (or run `xattr -dr com.apple.quarantine PenlightSync.app` in Terminal) to clear the quarantine flag and launch it.
+Every rebuild or update counts as a new app to macOS, so Bluetooth and Screen Recording must be allowed again.
 
 ### Windows
 
